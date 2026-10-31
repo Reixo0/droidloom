@@ -16,5 +16,9 @@ cc_library_shared {
             // Desktop applications must resolve readlink to ordinary bionic.
             version_script: "exported.x86_64.map.txt",
         },
+        arm64: {
+            // Test on the NX809J: let applications resolve readlink to bionic.
+            version_script: "exported.x86_64.map.txt",
+        },
     },
 }
