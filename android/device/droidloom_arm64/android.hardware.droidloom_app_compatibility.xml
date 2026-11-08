@@ -15,11 +15,13 @@
       off (the SettingsProvider overlay defaults Bluetooth off). GPS is the
       host's location, through Droidloom's GNSS HAL and the user's
       droidloom-location broker (geoclue); without it, location comes only
-      from network providers.
+      from network providers. NFC is the host controller's raw NCI
+      (/dev/nfc-nci) through Droidloom's NFC HAL; on a host without one,
+      Android's NFC switch fails to turn on.
 
       Deliberately not declared, because they start stacks that need real
       hardware or conflict with the host: telephony and telecom (radio
-      services), USB host/accessory (would drive the host's USB gadget), NFC,
+      services), USB host/accessory (would drive the host's USB gadget),
       UWB, biometrics and consumer IR. Vulkan levels are detected at runtime
       by the framework, not declared here.
     -->
@@ -29,6 +31,9 @@
     <feature name="android.hardware.location.network" />
     <feature name="android.hardware.location.gps" />
     <feature name="android.hardware.wifi" />
+    <feature name="android.hardware.nfc" />
+    <feature name="android.hardware.nfc.any" />
+    <feature name="android.hardware.nfc.hce" />
     <feature name="android.hardware.camera" />
     <feature name="android.hardware.camera.any" />
     <feature name="android.hardware.camera.autofocus" />

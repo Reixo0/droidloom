@@ -40,6 +40,10 @@ const DEVELOPMENT_SYSTEM_LOWER: &str = "system-lower";
 const BINDERFS_NAME_MAX: usize = 255;
 const BINDERFS_DEVICE_NAME_BYTES: usize = BINDERFS_NAME_MAX + 1;
 const ANDROID_DENIAL_SOCKET: &str = "dev/socket/droidloom/denial";
+/// A host NFC controller handing out raw NCI, one packet per read or write.
+const NFC_DEVICE: &str = "/dev/nfc-nci";
+/// Android's nfc user, which runs the NFC HAL.
+const AID_NFC: u32 = 1027;
 const ANDROID_RENDER_NODE: &str = "renderD128";
 const ANDROID_CGROUPS_TARGET: &str = "system/etc/cgroups.json";
 const DEVELOPMENT_CGROUPS: &str = include_str!("../assets/development-cgroups.json");
@@ -1972,6 +1976,13 @@ fn create_private_dev(spec: &CellSpec, root: &Path) -> Result<(), DevelopmentErr
             eprintln!("droidloom-supervisor: no media DMA heap, apps cannot decode media: {error}");
         }
     }
+    // The controller serves one NCI stack at a time; Android's opens it only
+    // while NFC is on there, and the node is for its nfc user alone.
+    if Path::new(NFC_DEVICE).exists() {
+        if let Err(error) = create_nfc_device(root) {
+            eprintln!("droidloom-supervisor: no NFC for Android: {error}");
+        }
+    }
 
     let denial_target = root.join(ANDROID_DENIAL_SOCKET);
     create_mount_target(&denial_target)?;
@@ -2032,6 +2043,13 @@ fn create_auxiliary_device(root: &Path, path: &Path) -> Result<(), DevelopmentEr
     fs::create_dir_all(target.parent().expect("device parent"))
         .map_err(|source| io_error("create private graphics device directory", source))?;
     make_device_node(&target, "c", major, minor, "666")
+}
+
+fn create_nfc_device(root: &Path) -> Result<(), DevelopmentError> {
+    let (major, minor) = auxiliary_graphics_device_numbers(Path::new(NFC_DEVICE))?;
+    let target = root.join(NFC_DEVICE.strip_prefix('/').expect("fixed absolute device path"));
+    make_device_node(&target, "c", major, minor, "660")?;
+    set_owner(&target, AID_NFC, AID_NFC)
 }
 
 fn auxiliary_graphics_device_numbers(path: &Path) -> Result<(u32, u32), DevelopmentError> {

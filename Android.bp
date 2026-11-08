@@ -193,6 +193,24 @@ rust_binary {
     ],
 }
 
+// NFC AIDL V2 service: raw NCI between Android's NFC stack and the host
+// controller's /dev/nfc-nci.
+rust_binary {
+    name: "android.hardware.nfc-service.droidloom",
+    crate_name: "droidloom_nfc_service",
+    crate_root: "android/nfc/droidloom-nfc-service/src/main.rs",
+    edition: "2024",
+    vendor: true,
+    relative_install_path: "hw",
+    init_rc: ["android/device/droidloom_arm64/droidloom-nfc.rc"],
+    vintf_fragments: ["android/device/droidloom_arm64/droidloom-nfc.xml"],
+    rustlibs: [
+        "android.hardware.nfc-V2-rust",
+        "libbinder_rs",
+        "liblibc",
+    ],
+}
+
 // Safe fixed-record encoder used after Denial has selected one Android task.
 rust_library {
     name: "libdroidloom_input_protocol",

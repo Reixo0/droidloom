@@ -805,6 +805,7 @@
         "gnss/1.0",
         "gnss/2.1",
         "gnss/aidl",
+        "nfc/aidl",
         "ir/aidl",
         "light/aidl",
         "oemlock/1.0",

@@ -804,6 +804,7 @@ pub fn build_targets(
         "android/gpu",
         "android/power",
         "android/location",
+        "android/nfc",
         "android/lmkd-compat",
         "android/runtime",
         "android/native-bridge",

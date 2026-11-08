@@ -287,7 +287,9 @@ fn android_vendor_build_uses_the_safe_rust_composer_core() {
     assert!(android_bp.contains("crate_root: \"android/gpu/droidloom-vulkan/src/lib.rs\""));
     // Five shared transport/codec crates also build platform variants for WMS
     // and its native input receiver.
-    assert_eq!(android_bp.matches("vendor: true").count(), 19);
+    assert!(android_bp.contains("name: \"android.hardware.nfc-service.droidloom\""));
+    assert!(android_bp.contains("\"android.hardware.nfc-V2-rust\""));
+    assert_eq!(android_bp.matches("vendor: true").count(), 20);
 
     let product = fs::read_to_string(
         repository_root().join("android/device/droidloom_arm64/droidloom_arm64.mk"),
@@ -302,6 +304,8 @@ fn android_vendor_build_uses_the_safe_rust_composer_core() {
     assert!(!product.contains("android.hardware.power-service.example"));
     // Location comes from the host through Droidloom's GNSS HAL.
     assert!(product.contains("android.hardware.gnss-service.droidloom"));
+    // NFC is the host controller's raw NCI, when the host has one.
+    assert!(product.contains("android.hardware.nfc-service.droidloom"));
     assert!(product.contains("debug.hwui.use_hint_manager=true"));
     assert!(product.contains("DroidloomConnectivityOverlay"));
     assert!(product.contains("android.hardware.ethernet.prebuilt.xml"));

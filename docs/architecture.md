@@ -1092,6 +1092,20 @@ There are no satellites, raw measurements, NMEA, batching, geofences or
 assistance data: the host gives positions only, and those extensions are
 unsupported. The GNSS AIDL interface's Rust backend is enabled by
 `android/aosp-patches/0020-gnss-rust-backend.patch`.
+
+### NFC
+
+Android's NFC is the host's controller. When the host has `/dev/nfc-nci` (a
+controller driver that hands out raw NCI, one packet per read or write, such as
+the ST54L's), the supervisor creates the node in the cell for Android's `nfc`
+user (1027) alone. `android.hardware.nfc-service.droidloom` (a Rust NFC AIDL V2
+service in the vendor image) opens it while NFC is on in Android and relays
+packets between it and Android's NFC stack; the host driver powers the
+controller on open and off on close, and serves one NCI stack at a time. Every
+route is the host: tags are read and apps emulate cards (HCE), but the
+controller's secure element is not offered. The vendor image declares
+`android.hardware.nfc`, `nfc.any` and `nfc.hce`; on a host without the node,
+Android's NFC switch fails to turn on.
 App labels supplied by a compromised cell are not trusted host identities.
 
 ### What Linux-generic means

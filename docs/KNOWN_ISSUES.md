@@ -539,6 +539,13 @@ The subsequent source fixes and full-suite results are recorded above.
   sharing depends on compositor protocol support. Surrounding text and cursor
   geometry are not exported through the text-input integration. Inline
   notification replies and custom Android notification layouts are unsupported.
+- **A new hardware feature needs Android's package cache cleared.** Android
+  caches each app's parsed manifest under `/data/system/package_cache` and
+  keeps it while the system image is unchanged, so an app whose manifest
+  depends on a feature (NFC's `persistentWhenFeatureAvailable`) keeps the
+  answer from before a vendor update declared that feature. Android's NFC app
+  then never starts. Until updates invalidate the cache, remove that app's
+  cache entry and restart Droidloom.
 - **Shared host kernel.** This is an Android container runtime, not a virtual
   machine. See [security requirements](threat-model-v2.md) for isolation boundaries.
 

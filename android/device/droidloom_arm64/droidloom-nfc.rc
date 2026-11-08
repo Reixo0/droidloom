@@ -1,0 +1,8 @@
+# Raw NCI between Android's NFC stack and the host controller's
+# /dev/nfc-nci, which the supervisor creates for the nfc user.
+service vendor.nfc-droidloom /vendor/bin/hw/android.hardware.nfc-service.droidloom
+    class hal
+    user nfc
+    group nfc
+    interface aidl android.hardware.nfc.INfc/default
+    stdio_to_kmsg
