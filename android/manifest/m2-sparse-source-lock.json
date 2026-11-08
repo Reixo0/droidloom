@@ -825,6 +825,7 @@
         "gnss/aidl",
         "nfc/aidl",
         "camera",
+        "sensors",
         "ir/aidl",
         "light/aidl",
         "oemlock/1.0",

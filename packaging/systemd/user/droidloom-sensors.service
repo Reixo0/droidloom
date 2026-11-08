@@ -1,0 +1,13 @@
+[Unit]
+Description=Droidloom host sensor broker
+PartOf=droidloom.service
+Requires=droidloom-sensors.socket
+
+[Service]
+ExecStart=/usr/bin/droidloom-sensors --socket %t/droidloom/sensors.sock
+Restart=on-failure
+RestartSec=1
+NoNewPrivileges=true
+RestrictSUIDSGID=true
+# As with audio, filesystem namespacing in a user unit would map only the host
+# user and hide the sensors HAL's UID from SO_PEERCRED.

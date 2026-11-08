@@ -546,6 +546,16 @@ The subsequent source fixes and full-suite results are recorded above.
   answer from before a vendor update declared that feature. Android's NFC app
   then never starts. Until updates invalidate the cache, remove that app's
   cache entry and restart Droidloom.
+- **Android's auto-rotate reset the RedMagic 11 Pro.** With the host's
+  sensors in Android and Android's auto-rotate on, the phone reset silently
+  (no kernel message) twice, 10 s and 2.5 min after Android had sensor data;
+  with auto-rotate off it has not. Android rotating its display is the
+  suspect. Keep Android's auto-rotate off; the host rotates its own screen.
+- **Restarting the sensor socket cuts Android off.** The supervisor binds the
+  inode of `droidloom-sensors.socket` (as it does location's and audio's)
+  when Android starts. Restarting the broker service keeps the socket;
+  stopping the socket unit makes a new one, which Android reaches only after
+  Droidloom restarts.
 - **Shared host kernel.** This is an Android container runtime, not a virtual
   machine. See [security requirements](threat-model-v2.md) for isolation boundaries.
 

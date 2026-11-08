@@ -2029,10 +2029,10 @@ fn create_private_dev(spec: &CellSpec, root: &Path) -> Result<(), DevelopmentErr
         create_mount_target(&target)?;
         bind_mount(&text_socket, &target, false)?;
     }
-    // Audio, location and the GPU server are separate user brokers. Their
+    // Audio, location, sensors and the GPU server are separate user brokers. Their
     // systemd-owned sockets survive broker restarts, preserving the inodes
     // bind-mounted into the Android cell.
-    for name in ["clipboard", "notifications", "audio", "location", "gpu"] {
+    for name in ["clipboard", "notifications", "audio", "location", "sensors", "gpu"] {
         let socket = spec.denial_socket.with_file_name(format!("{name}.sock"));
         if socket.exists() {
             if !fs::symlink_metadata(&socket)
@@ -2044,7 +2044,7 @@ fn create_private_dev(spec: &CellSpec, root: &Path) -> Result<(), DevelopmentErr
                     "{name} endpoint is not a socket"
                 )));
             }
-            let target = if matches!(name, "audio" | "location" | "gpu") {
+            let target = if matches!(name, "audio" | "location" | "sensors" | "gpu") {
                 root.join("dev/socket/droidloom").join(name)
             } else {
                 framework_host.join(name)

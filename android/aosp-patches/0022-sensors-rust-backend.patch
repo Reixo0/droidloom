@@ -1,0 +1,13 @@
+diff --git a/sensors/aidl/Android.bp b/sensors/aidl/Android.bp
+--- a/sensors/aidl/Android.bp
++++ b/sensors/aidl/Android.bp
+@@ -24,6 +24,9 @@
+         },
+         java: {
+             enabled: false,
++        },
++        rust: {
++            enabled: true,
+         },
+     },
+     versions_with_info: [

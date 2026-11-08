@@ -8,6 +8,8 @@ members = [
     "runtime/droidloom-audio-protocol",
     "runtime/droidloom-location",
     "runtime/droidloom-location-protocol",
+    "runtime/droidloom-sensors",
+    "runtime/droidloom-sensors-protocol",
     "android/audio/droidloom-audio-client",
     "runtime/droidloom-cpu-placement",
     "runtime/droidloom-timing",

@@ -1,0 +1,8 @@
+# The host's sensors as Android's, from the user's droidloom-sensors broker
+# through /dev/socket/droidloom/sensors.
+service vendor.sensors-droidloom /vendor/bin/hw/android.hardware.sensors-service.droidloom
+    class hal
+    user system
+    group system
+    interface aidl android.hardware.sensors.ISensors/default
+    stdio_to_kmsg

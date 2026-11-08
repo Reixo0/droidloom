@@ -29,6 +29,7 @@ for required in \
     "$payload/usr/bin/droidloom-applications" \
     "$payload/usr/bin/droidloom-audio" \
     "$payload/usr/bin/droidloom-location" \
+    "$payload/usr/bin/droidloom-sensors" \
     "$payload/usr/bin/droidloom-gpu-server" \
     "$payload/usr/bin/droidloom-supervisor" \
     "$payload/usr/bin/droidloom-wayland" \
@@ -38,6 +39,8 @@ for required in \
     "$payload/usr/lib/systemd/user/droidloom-audio.socket" \
     "$payload/usr/lib/systemd/user/droidloom-location.service" \
     "$payload/usr/lib/systemd/user/droidloom-location.socket" \
+    "$payload/usr/lib/systemd/user/droidloom-sensors.service" \
+    "$payload/usr/lib/systemd/user/droidloom-sensors.socket" \
     "$payload/usr/lib/systemd/user/droidloom-gpu.service" \
     "$payload/usr/lib/systemd/user/droidloom-gpu.socket" \
     "$payload/usr/lib/systemd/user/droidloom.service" \
@@ -156,7 +159,7 @@ mv -Tf -- /usr/lib/droidloom/.current-new /usr/lib/droidloom/current
 ln -s -- "$image_link" /var/lib/droidloom/images/.current-new
 mv -Tf -- /var/lib/droidloom/images/.current-new /var/lib/droidloom/images/current
 
-for binary in droidloomd droidloomctl droidloom-applications droidloom-audio droidloom-location droidloom-gpu-server droidloom-supervisor droidloom-wayland; do
+for binary in droidloomd droidloomctl droidloom-applications droidloom-audio droidloom-location droidloom-sensors droidloom-gpu-server droidloom-supervisor droidloom-wayland; do
     install -m 0755 "$payload/usr/bin/$binary" "/usr/bin/$binary"
 done
 install -D -m 0644 "$payload/etc/droidloom/cell.json" /etc/droidloom/cell.json
@@ -176,6 +179,10 @@ install -D -m 0644 "$payload/usr/lib/systemd/user/droidloom-location.service" \
     /usr/lib/systemd/user/droidloom-location.service
 install -D -m 0644 "$payload/usr/lib/systemd/user/droidloom-location.socket" \
     /usr/lib/systemd/user/droidloom-location.socket
+install -D -m 0644 "$payload/usr/lib/systemd/user/droidloom-sensors.service" \
+    /usr/lib/systemd/user/droidloom-sensors.service
+install -D -m 0644 "$payload/usr/lib/systemd/user/droidloom-sensors.socket" \
+    /usr/lib/systemd/user/droidloom-sensors.socket
 install -D -m 0644 "$payload/usr/lib/systemd/user/droidloom-gpu.service" \
     /usr/lib/systemd/user/droidloom-gpu.service
 install -D -m 0644 "$payload/usr/lib/systemd/user/droidloom-gpu.socket" \

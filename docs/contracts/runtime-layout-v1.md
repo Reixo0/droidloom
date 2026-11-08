@@ -240,6 +240,19 @@ interval and `STOP`; the host sends `FIX` records while started and `DENIED`
 when the host's location service refuses. Closing the socket stops the host
 session. Neither the system bus nor geoclue enters Android.
 
+## Private sensors endpoint (DLSNS001)
+
+The user `droidloom-sensors.socket` unit owns `%t/droidloom/sensors.sock`
+under the same mode-0700 runtime directory. The supervisor may bind only that
+socket inode at `/dev/socket/droidloom/sensors`. The broker runs as the host
+user and authenticates the sensors HAL's kernel-mapped UID (1000, `system`).
+Records are exactly 64 bytes and carry `DLSNS001`: the HAL sends `WANT` with
+the host sensors its listeners need whenever that changes; the host sends a
+`SAMPLE` for each new reading of a wanted sensor, starting with the current
+one of an on-change sensor. Closing the socket wants none, and the broker's
+claims end with its bus connection. Neither the system bus nor steinerd
+enters Android.
+
 ## Network
 
 Each cell owns a network namespace and one veth peer. Host policy assigns its

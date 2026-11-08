@@ -211,6 +211,42 @@ rust_binary {
     ],
 }
 
+// Sensors AIDL V3 service: the host user's sensors (steinerd, through
+// droidloom-sensors) as Android's.
+rust_library {
+    name: "libdroidloom_sensors_protocol",
+    crate_name: "droidloom_sensors_protocol",
+    crate_root: "runtime/droidloom-sensors-protocol/src/lib.rs",
+    edition: "2024",
+    vendor: true,
+}
+
+rust_binary {
+    name: "android.hardware.sensors-service.droidloom",
+    crate_name: "droidloom_sensors_service",
+    crate_root: "android/sensors/droidloom-sensors-service/src/main.rs",
+    edition: "2024",
+    vendor: true,
+    relative_install_path: "hw",
+    init_rc: ["android/device/droidloom_arm64/droidloom-sensors.rc"],
+    vintf_fragments: ["android/device/droidloom_arm64/droidloom-sensors.xml"],
+    rustlibs: [
+        "android.hardware.common.fmq-V1-rust",
+        "android.hardware.sensors-V3-rust",
+        "libbinder_rs",
+        "libdroidloom_denial_ipc",
+        "libdroidloom_sensors_protocol",
+        "libfmq_rust",
+        "liblibc",
+    ],
+    // libfmq's C++ half, under libfmq_rust.
+    shared_libs: [
+        "libbase",
+        "libcutils",
+        "libutils",
+    ],
+}
+
 // Safe fixed-record encoder used after Denial has selected one Android task.
 rust_library {
     name: "libdroidloom_input_protocol",

@@ -1093,6 +1093,27 @@ assistance data: the host gives positions only, and those extensions are
 unsupported. The GNSS AIDL interface's Rust backend is enabled by
 `android/aosp-patches/0020-gnss-rust-backend.patch`.
 
+### Sensors
+
+Android's sensors are the host's. `android.hardware.sensors-service.droidloom`
+(a Rust sensors AIDL V3 service in the vendor image, user `system`) connects
+to `/dev/socket/droidloom/sensors` while Android has listeners and says which
+host sensors they need; the socket is the inode of the user's
+`droidloom-sensors.socket`, which the supervisor binds as it does location's.
+`runtime/droidloom-sensors` claims those from steinerd, the host's sensor
+service, for exactly as long, and forwards each new reading. Records are fixed
+64-byte `DLSNS001` packets (`runtime/droidloom-sensors-protocol`).
+
+Android sees an accelerometer and a gyroscope (as fast as the host publishes,
+30 a second), an ambient light sensor, and a wake-up proximity sensor (Android
+looks only for a wake-up one). The host's compass is a heading: its raw
+magnetometer is swamped by the phone's own magnets. The magnetic field and the
+rotation vector apps use are made from the heading and gravity, the field
+being the Earth's as it would point; the rotation vector's accuracy follows
+the heading's calibration. There is no direct channel, batching or data
+injection. The sensors AIDL interface's Rust backend is enabled by
+`android/aosp-patches/0022-sensors-rust-backend.patch`.
+
 ### NFC
 
 Android's NFC is the host's controller. When the host has `/dev/nfc-nci` (a

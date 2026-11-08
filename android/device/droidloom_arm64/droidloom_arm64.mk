@@ -45,6 +45,7 @@ PRODUCT_PACKAGES += \
     android.hardware.health-service.example \
     android.hardware.power-service.droidloom \
     android.hardware.gnss-service.droidloom \
+    android.hardware.sensors-service.droidloom \
     android.hardware.nfc-service.droidloom \
     android.hardware.camera.provider-V1-external-service \
     droidloom-external-camera-config \

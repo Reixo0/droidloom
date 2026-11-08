@@ -283,6 +283,9 @@ fn android_vendor_build_uses_the_safe_rust_composer_core() {
     assert!(android_bp.contains("name: \"android.hardware.gnss-service.droidloom\""));
     assert!(android_bp.contains("crate_root: \"runtime/droidloom-location-protocol/src/lib.rs\""));
     assert!(android_bp.contains("\"android.hardware.gnss-V7-rust\""));
+    assert!(android_bp.contains("name: \"android.hardware.sensors-service.droidloom\""));
+    assert!(android_bp.contains("crate_root: \"runtime/droidloom-sensors-protocol/src/lib.rs\""));
+    assert!(android_bp.contains("\"android.hardware.sensors-V3-rust\""));
     assert!(android_bp.contains("name: \"vulkan.droidloom\""));
     assert!(android_bp.contains("crate_root: \"android/gpu/droidloom-vulkan/src/lib.rs\""));
     // Five shared transport/codec crates also build platform variants for WMS
@@ -290,7 +293,7 @@ fn android_vendor_build_uses_the_safe_rust_composer_core() {
     assert!(android_bp.contains("name: \"android.hardware.nfc-service.droidloom\""));
     assert!(android_bp.contains("\"android.hardware.nfc-V2-rust\""));
     assert!(android_bp.contains("name: \"droidloom-external-camera-config\""));
-    assert_eq!(android_bp.matches("vendor: true").count(), 21);
+    assert_eq!(android_bp.matches("vendor: true").count(), 23);
 
     let product = fs::read_to_string(
         repository_root().join("android/device/droidloom_arm64/droidloom_arm64.mk"),
@@ -305,6 +308,7 @@ fn android_vendor_build_uses_the_safe_rust_composer_core() {
     assert!(!product.contains("android.hardware.power-service.example"));
     // Location comes from the host through Droidloom's GNSS HAL.
     assert!(product.contains("android.hardware.gnss-service.droidloom"));
+    assert!(product.contains("android.hardware.sensors-service.droidloom"));
     // NFC is the host controller's raw NCI, when the host has one.
     assert!(product.contains("android.hardware.nfc-service.droidloom"));
     // Cameras are the host's, fed as MJPEG to AOSP's external camera HAL.

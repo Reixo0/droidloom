@@ -1,0 +1,9 @@
+[Unit]
+Description=Droidloom private Android sensors endpoint
+PartOf=droidloom.service
+
+[Socket]
+ListenSequentialPacket=%t/droidloom/sensors.sock
+SocketMode=0666
+DirectoryMode=0700
+RemoveOnStop=true

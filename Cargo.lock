@@ -740,6 +740,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "droidloom-sensors"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "droidloom-denial-ipc",
+ "droidloom-sensors-protocol",
+ "libc",
+ "zbus",
+]
+
+[[package]]
+name = "droidloom-sensors-protocol"
+version = "0.1.0"
+
+[[package]]
 name = "droidloom-source"
 version = "0.1.0"
 dependencies = [

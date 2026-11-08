@@ -1,0 +1,20 @@
+[package]
+name = "droidloom-sensors"
+description = "Per-user steinerd bridge for Android's sensors"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+clap.workspace = true
+droidloom-denial-ipc = { path = "../../graphics/droidloom-denial-ipc" }
+droidloom-sensors-protocol = { path = "../droidloom-sensors-protocol" }
+libc.workspace = true
+zbus = { version = "5.18.0", default-features = false, features = ["blocking-api", "async-io"] }
+
+[lints.rust]
+unsafe_code = "allow"
+unsafe_op_in_unsafe_fn = "deny"
+missing_docs = "warn"
