@@ -144,6 +144,10 @@ const PATCHES: &[(&str, &str)] = &[
         "android/aosp-patches/0020-gnss-rust-backend.patch",
     ),
     (
+        "hardware/interfaces",
+        "android/aosp-patches/0021-camera-external-node-facing.patch",
+    ),
+    (
         "frameworks/av",
         "android/audio/0001-host-buffered-playback.patch",
     ),
@@ -805,6 +809,7 @@ pub fn build_targets(
         "android/power",
         "android/location",
         "android/nfc",
+        "android/camera",
         "android/lmkd-compat",
         "android/runtime",
         "android/native-bridge",

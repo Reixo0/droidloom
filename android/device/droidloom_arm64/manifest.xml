@@ -1,2 +1,8 @@
 <manifest version="9.0" type="device" target-level="202604">
+    <!-- AOSP's external camera HAL, for the host's cameras (android/camera). -->
+    <hal format="aidl">
+        <name>android.hardware.camera.provider</name>
+        <version>1</version>
+        <fqname>ICameraProvider/external/0</fqname>
+    </hal>
 </manifest>

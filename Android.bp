@@ -224,6 +224,14 @@ rust_library {
     no_stdlibs: true,
 }
 
+// The external camera HAL's devices: the host's back and front cameras.
+prebuilt_etc {
+    name: "droidloom-external-camera-config",
+    src: "android/camera/external_camera_config.xml",
+    filename: "external_camera_config.xml",
+    vendor: true,
+}
+
 prebuilt_etc {
     name: "droidloom-framework-init",
     src: "android/framework/droidloom-window-policy/droidloom-framework.rc",

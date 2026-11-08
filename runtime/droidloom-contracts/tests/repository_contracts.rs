@@ -289,7 +289,8 @@ fn android_vendor_build_uses_the_safe_rust_composer_core() {
     // and its native input receiver.
     assert!(android_bp.contains("name: \"android.hardware.nfc-service.droidloom\""));
     assert!(android_bp.contains("\"android.hardware.nfc-V2-rust\""));
-    assert_eq!(android_bp.matches("vendor: true").count(), 20);
+    assert!(android_bp.contains("name: \"droidloom-external-camera-config\""));
+    assert_eq!(android_bp.matches("vendor: true").count(), 21);
 
     let product = fs::read_to_string(
         repository_root().join("android/device/droidloom_arm64/droidloom_arm64.mk"),
@@ -306,6 +307,8 @@ fn android_vendor_build_uses_the_safe_rust_composer_core() {
     assert!(product.contains("android.hardware.gnss-service.droidloom"));
     // NFC is the host controller's raw NCI, when the host has one.
     assert!(product.contains("android.hardware.nfc-service.droidloom"));
+    // Cameras are the host's, fed as MJPEG to AOSP's external camera HAL.
+    assert!(product.contains("android.hardware.camera.provider-V1-external-service"));
     assert!(product.contains("debug.hwui.use_hint_manager=true"));
     assert!(product.contains("DroidloomConnectivityOverlay"));
     assert!(product.contains("android.hardware.ethernet.prebuilt.xml"));

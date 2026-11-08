@@ -1106,6 +1106,24 @@ route is the host: tags are read and apps emulate cards (HCE), but the
 controller's secure element is not offered. The vendor image declares
 `android.hardware.nfc`, `nfc.any` and `nfc.hce`; on a host without the node,
 Android's NFC switch fails to turn on.
+
+### Cameras
+
+Android's back and front cameras are the host's, as V4L2 capture devices
+carrying MJPEG. The supervisor looks for the host's devices named `Back
+camera` and `Front camera` (on a phone, v4l2loopback devices with those card
+labels, which the phone's camera service feeds) and creates them in the cell
+as `/dev/video0` and `/dev/video1` for Android's `cameraserver` user and
+`camera` group. AOSP's external camera HAL
+(`android.hardware.camera.provider-V1-external-service`) serves them;
+`android/camera/external_camera_config.xml` makes node 0 a back camera and
+node 1 a front one, with the orientations of a phone's sensors, which
+`android/aosp-patches/0021-camera-external-node-facing.patch` lets the
+configuration say. The host feeds frames turned the way such a sensor sits,
+unmirrored, and decides who may see the camera: it streams only while
+Android reads, and a camera the host refuses streams black. The HAL takes
+photos from the stream, so photos are at its size; there is no focus or
+zoom control, no flash, and no raw.
 App labels supplied by a compromised cell are not trusted host identities.
 
 ### What Linux-generic means

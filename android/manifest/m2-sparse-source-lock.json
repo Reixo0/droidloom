@@ -535,6 +535,24 @@
       "purpose": "Pinned Soong bootstrap Starlark implementation"
     },
     {
+      "path": "external/libyuv",
+      "name": "platform/external/libyuv",
+      "commit": "49130481509c59cdd486a05595fd809adafedf39",
+      "purpose": "Frame conversion for the external (V4L2) camera HAL"
+    },
+    {
+      "path": "external/libjpeg-turbo",
+      "name": "platform/external/libjpeg-turbo",
+      "commit": "a83d12ab3266dae9a9a0ab8f3c1799459d24ed96",
+      "purpose": "JPEG decoding and encoding for the external (V4L2) camera HAL"
+    },
+    {
+      "path": "external/libexif",
+      "name": "platform/external/libexif",
+      "commit": "e180c53a25cc0f26e6e0caf4a2708c41b8ec5214",
+      "purpose": "EXIF metadata for the external (V4L2) camera HAL's photos"
+    },
+    {
       "path": "external/tinyxml2",
       "name": "platform/external/tinyxml2",
       "commit": "33ba115074c80a720826efffab1937d5b355c3b8",
@@ -806,6 +824,7 @@
         "gnss/2.1",
         "gnss/aidl",
         "nfc/aidl",
+        "camera",
         "ir/aidl",
         "light/aidl",
         "oemlock/1.0",

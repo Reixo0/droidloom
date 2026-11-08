@@ -46,6 +46,8 @@ PRODUCT_PACKAGES += \
     android.hardware.power-service.droidloom \
     android.hardware.gnss-service.droidloom \
     android.hardware.nfc-service.droidloom \
+    android.hardware.camera.provider-V1-external-service \
+    droidloom-external-camera-config \
     com.android.hardware.audio.droidloom \
     DroidloomFrameworkDisplayOverlay \
     DroidloomConnectivityOverlay \

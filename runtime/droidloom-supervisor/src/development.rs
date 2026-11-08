@@ -44,6 +44,17 @@ const ANDROID_DENIAL_SOCKET: &str = "dev/socket/droidloom/denial";
 const NFC_DEVICE: &str = "/dev/nfc-nci";
 /// Android's nfc user, which runs the NFC HAL.
 const AID_NFC: u32 = 1027;
+/// The host's cameras for Android's external camera HAL: V4L2 capture
+/// devices with these names (their kernel `name`, a v4l2loopback card
+/// label), which the cell sees as `/dev/video0` and `/dev/video1`; the HAL's
+/// configuration makes them its back and front cameras.
+const CAMERA_DEVICES: [(&str, &str); 2] = [
+    ("Back camera", "dev/video0"),
+    ("Front camera", "dev/video1"),
+];
+/// Android's cameraserver user and camera group, which run the camera HAL.
+const AID_CAMERASERVER: u32 = 1047;
+const AID_CAMERA: u32 = 1006;
 const ANDROID_RENDER_NODE: &str = "renderD128";
 const ANDROID_CGROUPS_TARGET: &str = "system/etc/cgroups.json";
 const DEVELOPMENT_CGROUPS: &str = include_str!("../assets/development-cgroups.json");
@@ -1983,6 +1994,14 @@ fn create_private_dev(spec: &CellSpec, root: &Path) -> Result<(), DevelopmentErr
             eprintln!("droidloom-supervisor: no NFC for Android: {error}");
         }
     }
+    for (name, target) in CAMERA_DEVICES {
+        let Some(device) = video_device_named(name) else {
+            continue;
+        };
+        if let Err(error) = create_camera_device(root, &device, target) {
+            eprintln!("droidloom-supervisor: no {name} for Android: {error}");
+        }
+    }
 
     let denial_target = root.join(ANDROID_DENIAL_SOCKET);
     create_mount_target(&denial_target)?;
@@ -2050,6 +2069,27 @@ fn create_nfc_device(root: &Path) -> Result<(), DevelopmentError> {
     let target = root.join(NFC_DEVICE.strip_prefix('/').expect("fixed absolute device path"));
     make_device_node(&target, "c", major, minor, "660")?;
     set_owner(&target, AID_NFC, AID_NFC)
+}
+
+/// The host's V4L2 device whose kernel name is `name`.
+fn video_device_named(name: &str) -> Option<PathBuf> {
+    let mut found: Vec<PathBuf> = fs::read_dir("/sys/class/video4linux")
+        .ok()?
+        .flatten()
+        .filter(|entry| {
+            fs::read_to_string(entry.path().join("name")).is_ok_and(|text| text.trim_end() == name)
+        })
+        .map(|entry| Path::new("/dev").join(entry.file_name()))
+        .collect();
+    found.sort();
+    found.into_iter().next()
+}
+
+fn create_camera_device(root: &Path, device: &Path, target: &str) -> Result<(), DevelopmentError> {
+    let (major, minor) = auxiliary_graphics_device_numbers(device)?;
+    let target = root.join(target);
+    make_device_node(&target, "c", major, minor, "660")?;
+    set_owner(&target, AID_CAMERASERVER, AID_CAMERA)
 }
 
 fn auxiliary_graphics_device_numbers(path: &Path) -> Result<(u32, u32), DevelopmentError> {

@@ -1,0 +1,86 @@
+diff --git a/camera/device/default/ExternalCameraDevice.cpp b/camera/device/default/ExternalCameraDevice.cpp
+--- a/camera/device/default/ExternalCameraDevice.cpp
++++ b/camera/device/default/ExternalCameraDevice.cpp
+@@ -420,7 +420,15 @@
+     const uint8_t opticalStabilizationMode = ANDROID_LENS_OPTICAL_STABILIZATION_MODE_OFF;
+     UPDATE(ANDROID_LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION, &opticalStabilizationMode, 1);
+ 
+-    const uint8_t facing = ANDROID_LENS_FACING_EXTERNAL;
++    uint8_t facing = ANDROID_LENS_FACING_EXTERNAL;
++    std::smatch node;
++    const auto configured =
++            std::regex_match(mDevicePath, node, kDevicePathRE)
++                    ? mCfg.nodeFacing.find(std::stoi(node[1]))
++                    : mCfg.nodeFacing.end();
++    if (configured != mCfg.nodeFacing.end()) {
++        facing = configured->second.facing;
++    }
+     UPDATE(ANDROID_LENS_FACING, &facing, 1);
+ 
+     // android.noiseReduction
+@@ -473,7 +481,8 @@
+     // natural display orientation. For devices with natural landscape display (ex: tablet/TV), the
+     // orientation should be 0. For devices with natural portrait display (phone), the orientation
+     // should be 270.
+-    const int32_t orientation = mCfg.orientation;
++    const int32_t orientation =
++            configured != mCfg.nodeFacing.end() ? configured->second.orientation : mCfg.orientation;
+     UPDATE(ANDROID_SENSOR_ORIENTATION, &orientation, 1);
+ 
+     // android.shading
+diff --git a/camera/device/default/ExternalCameraUtils.cpp b/camera/device/default/ExternalCameraUtils.cpp
+--- a/camera/device/default/ExternalCameraUtils.cpp
++++ b/camera/device/default/ExternalCameraUtils.cpp
+@@ -26,6 +26,7 @@
+ #include <algorithm>
+ #include <cinttypes>
+ #include <cmath>
++#include <cstring>
+ 
+ #define HAVE_JPEG  // required for libyuv.h to export MJPEG decode APIs
+ #include <libyuv.h>
+@@ -168,6 +169,25 @@
+         ret.orientation = orientation->IntAttribute("degree", /*Default*/ kDefaultOrientation);
+     }
+ 
++    for (XMLElement* camera = deviceCfg->FirstChildElement("Camera"); camera != nullptr;
++         camera = camera->NextSiblingElement("Camera")) {
++        int node = camera->IntAttribute("node", /*Default*/ -1);
++        const char* facing = camera->Attribute("facing");
++        if (node < 0 || facing == nullptr) {
++            ALOGW("%s: a Camera entry needs node and facing", __FUNCTION__);
++            continue;
++        }
++        uint8_t lensFacing = ANDROID_LENS_FACING_EXTERNAL;
++        if (strcmp(facing, "back") == 0) {
++            lensFacing = ANDROID_LENS_FACING_BACK;
++        } else if (strcmp(facing, "front") == 0) {
++            lensFacing = ANDROID_LENS_FACING_FRONT;
++        }
++        ret.nodeFacing[node] = {lensFacing, camera->IntAttribute("degree", ret.orientation)};
++        ALOGI("%s: /dev/video%d faces %s, orientation %d", __FUNCTION__, node, facing,
++              ret.nodeFacing[node].orientation);
++    }
++
+     ALOGI("%s: external camera cfg loaded: maxJpgBufSize %d,"
+           " num video buffers %d, num still buffers %d, orientation %d",
+           __FUNCTION__, ret.maxJpegBufSize, ret.numVideoBuffers, ret.numStillBuffers,
+diff --git a/camera/device/default/ExternalCameraUtils.h b/camera/device/default/ExternalCameraUtils.h
+--- a/camera/device/default/ExternalCameraUtils.h
++++ b/camera/device/default/ExternalCameraUtils.h
+@@ -107,6 +107,15 @@
+     // The value of android.sensor.orientation
+     int32_t orientation;
+ 
++    // Per V4L2 node (the N of /dev/videoN): the camera's android.lens.facing
++    // and android.sensor.orientation, for a device whose nodes are its own
++    // cameras rather than USB ones. A node without an entry stays external.
++    struct NodeFacing {
++        uint8_t facing;
++        int32_t orientation;
++    };
++    std::unordered_map<int, NodeFacing> nodeFacing;
++
+   private:
+     ExternalCameraConfig();
+     static bool updateFpsList(tinyxml2::XMLElement* fpsList, std::vector<FpsLimitation>& fpsLimits);
