@@ -42,6 +42,8 @@ const ACCURACY_EXACT: u32 = 8;
 /// Bounds on how often a session looks for a new fix.
 const MIN_INTERVAL_MS: u32 = 1000;
 const MAX_INTERVAL_MS: u32 = 60_000;
+/// How long to wait before asking geoclue again after it failed.
+const RETRY: Duration = Duration::from_secs(3);
 
 #[derive(Parser)]
 #[command(about = "Per-user geoclue bridge for Android's location")]
@@ -169,9 +171,20 @@ impl Session {
         ));
         let stopped = stop.clone();
         let thread = std::thread::spawn(move || {
-            if let Err(error) = follow(&socket, interval, &stopped) {
-                eprintln!("droidloom-location: geoclue: {error}");
-                let _ = socket.send_record(&Record::Denied.encode(), &[]);
+            // geoclue can refuse, or restart and take the client with it:
+            // say so once, and keep asking until the session stops.
+            let mut denied = false;
+            while let Err(error) = follow(&socket, interval, &stopped) {
+                if !denied {
+                    eprintln!("droidloom-location: geoclue: {error}");
+                    if socket.send_record(&Record::Denied.encode(), &[]).is_err() {
+                        break;
+                    }
+                    denied = true;
+                }
+                if nap(RETRY, &stopped) {
+                    break;
+                }
             }
         });
         Self {
@@ -204,6 +217,7 @@ fn follow(socket: &SeqPacket, interval: Duration, stop: &AtomicBool) -> zbus::Re
     client.call_method("Start", &())?;
 
     let mut last = OwnedObjectPath::default();
+    let mut fix: Option<Fix> = None;
     while !stop.load(Ordering::SeqCst) {
         let location: OwnedObjectPath = client.get_property("Location")?;
         if location.as_str() != "/" && location != last {
@@ -215,24 +229,41 @@ fn follow(socket: &SeqPacket, interval: Duration, stop: &AtomicBool) -> zbus::Re
                 "org.freedesktop.DBus.Properties",
             )?;
             let all: HashMap<String, OwnedValue> = properties.call("GetAll", &(LOCATION,))?;
-            if let Some(fix) = fix_from(&all) {
-                let sent = socket.send_record(&Record::Fix(fix).encode(), &[]);
-                if sent.is_err() {
-                    break;
-                }
+            fix = fix_from(&all).or(fix);
+        }
+        // geoclue says nothing new while the phone stays put, and Android
+        // takes a quiet GPS for a lost one: the latest fix still holds, so it
+        // goes out every interval, as a receiver's would.
+        if let Some(mut current) = fix {
+            current.time_ms = now_ms();
+            if socket.send_record(&Record::Fix(current).encode(), &[]).is_err() {
+                break;
             }
         }
-        // Short naps so a stop is quick.
-        let mut slept = Duration::ZERO;
-        while slept < interval && !stop.load(Ordering::SeqCst) {
-            std::thread::sleep(Duration::from_millis(100));
-            slept += Duration::from_millis(100);
-        }
+        nap(interval, stop);
     }
 
     let _ = client.call_method("Stop", &());
     let _ = manager.call_method("DeleteClient", &(path,));
     Ok(())
+}
+
+fn now_ms() -> i64 {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    i64::try_from(now.as_millis()).unwrap_or(i64::MAX)
+}
+
+/// Sleeps for `length` in short naps, so a stop is quick; says whether the
+/// session stopped.
+fn nap(length: Duration, stop: &AtomicBool) -> bool {
+    let mut slept = Duration::ZERO;
+    while slept < length && !stop.load(Ordering::SeqCst) {
+        std::thread::sleep(Duration::from_millis(100));
+        slept += Duration::from_millis(100);
+    }
+    stop.load(Ordering::SeqCst)
 }
 
 fn number(all: &HashMap<String, OwnedValue>, name: &str) -> Option<f64> {
