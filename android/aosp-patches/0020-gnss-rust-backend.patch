@@ -1,0 +1,13 @@
+diff --git a/gnss/aidl/Android.bp b/gnss/aidl/Android.bp
+--- a/gnss/aidl/Android.bp
++++ b/gnss/aidl/Android.bp
+@@ -38,6 +38,9 @@
+         java: {
+             platform_apis: true,
+         },
++        rust: {
++            enabled: true,
++        },
+     },
+     versions_with_info: [
+         {

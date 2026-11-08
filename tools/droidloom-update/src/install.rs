@@ -15,6 +15,7 @@ const ALIASES: &[(&str, &str)] = &[
     ),
     ("/usr/bin/droidloom-wayland", "usr/bin/droidloom-wayland"),
     ("/usr/bin/droidloom-audio", "usr/bin/droidloom-audio"),
+    ("/usr/bin/droidloom-location", "usr/bin/droidloom-location"),
     ("/usr/bin/droidloom-gpu-server", "usr/bin/droidloom-gpu-server"),
     (
         "/usr/bin/droidloom-applications",
@@ -59,6 +60,14 @@ const ALIASES: &[(&str, &str)] = &[
     (
         "/usr/lib/systemd/user/droidloom-audio.socket",
         "usr/lib/systemd/user/droidloom-audio.socket",
+    ),
+    (
+        "/usr/lib/systemd/user/droidloom-location.service",
+        "usr/lib/systemd/user/droidloom-location.service",
+    ),
+    (
+        "/usr/lib/systemd/user/droidloom-location.socket",
+        "usr/lib/systemd/user/droidloom-location.socket",
     ),
     (
         "/usr/lib/systemd/user/droidloom-gpu.service",

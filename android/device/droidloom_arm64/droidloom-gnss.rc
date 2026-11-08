@@ -1,0 +1,8 @@
+# The host's location as Android's GPS, from the user's droidloom-location
+# broker through /dev/socket/droidloom/location.
+service vendor.gnss-droidloom /vendor/bin/hw/android.hardware.gnss-service.droidloom
+    class hal
+    user gps
+    group gps
+    interface aidl android.hardware.gnss.IGnss/default
+    stdio_to_kmsg

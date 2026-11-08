@@ -165,6 +165,34 @@ rust_binary {
     ],
 }
 
+// GNSS AIDL V7 service: the host user's location (geoclue, through
+// droidloom-location) as Android's GPS.
+rust_library {
+    name: "libdroidloom_location_protocol",
+    crate_name: "droidloom_location_protocol",
+    crate_root: "runtime/droidloom-location-protocol/src/lib.rs",
+    edition: "2024",
+    vendor: true,
+}
+
+rust_binary {
+    name: "android.hardware.gnss-service.droidloom",
+    crate_name: "droidloom_gnss_service",
+    crate_root: "android/location/droidloom-gnss-service/src/main.rs",
+    edition: "2024",
+    vendor: true,
+    relative_install_path: "hw",
+    init_rc: ["android/device/droidloom_arm64/droidloom-gnss.rc"],
+    vintf_fragments: ["android/device/droidloom_arm64/droidloom-gnss.xml"],
+    rustlibs: [
+        "android.hardware.gnss-V7-rust",
+        "libbinder_rs",
+        "libdroidloom_denial_ipc",
+        "libdroidloom_location_protocol",
+        "liblibc",
+    ],
+}
+
 // Safe fixed-record encoder used after Denial has selected one Android task.
 rust_library {
     name: "libdroidloom_input_protocol",

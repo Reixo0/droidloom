@@ -11,9 +11,11 @@
 
       Droidloom declares the features of a typical phone. Where the cell has
       no device behind one, Android's normal "absent or turned off" paths
-      apply: no camera or sensor is enumerated, location comes only from
-      network providers, and Bluetooth and Wi-Fi stay off (the
-      SettingsProvider overlay defaults Bluetooth off).
+      apply: no camera or sensor is enumerated, and Bluetooth and Wi-Fi stay
+      off (the SettingsProvider overlay defaults Bluetooth off). GPS is the
+      host's location, through Droidloom's GNSS HAL and the user's
+      droidloom-location broker (geoclue); without it, location comes only
+      from network providers.
 
       Deliberately not declared, because they start stacks that need real
       hardware or conflict with the host: telephony and telecom (radio

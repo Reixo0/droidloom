@@ -140,6 +140,10 @@ const PATCHES: &[(&str, &str)] = &[
         "android/aosp-patches/0002-audio-default-only-service.patch",
     ),
     (
+        "hardware/interfaces",
+        "android/aosp-patches/0020-gnss-rust-backend.patch",
+    ),
+    (
         "frameworks/av",
         "android/audio/0001-host-buffered-playback.patch",
     ),
@@ -794,10 +798,12 @@ pub fn build_targets(
         "runtime/droidloom-cpu-placement",
         "runtime/droidloom-timing",
         "runtime/droidloom-audio-protocol",
+        "runtime/droidloom-location-protocol",
         "android/audio",
         "android/framework",
         "android/gpu",
         "android/power",
+        "android/location",
         "android/lmkd-compat",
         "android/runtime",
         "android/native-bridge",

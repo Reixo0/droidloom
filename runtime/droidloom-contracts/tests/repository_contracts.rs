@@ -280,11 +280,14 @@ fn android_vendor_build_uses_the_safe_rust_composer_core() {
     assert!(android_bp.contains("name: \"android.hardware.power-service.droidloom\""));
     assert!(android_bp.contains("crate_root: \"android/power/droidloom-power/src/lib.rs\""));
     assert!(android_bp.contains("\"android.hardware.power-V7-rust\""));
+    assert!(android_bp.contains("name: \"android.hardware.gnss-service.droidloom\""));
+    assert!(android_bp.contains("crate_root: \"runtime/droidloom-location-protocol/src/lib.rs\""));
+    assert!(android_bp.contains("\"android.hardware.gnss-V7-rust\""));
     assert!(android_bp.contains("name: \"vulkan.droidloom\""));
     assert!(android_bp.contains("crate_root: \"android/gpu/droidloom-vulkan/src/lib.rs\""));
     // Five shared transport/codec crates also build platform variants for WMS
     // and its native input receiver.
-    assert_eq!(android_bp.matches("vendor: true").count(), 17);
+    assert_eq!(android_bp.matches("vendor: true").count(), 19);
 
     let product = fs::read_to_string(
         repository_root().join("android/device/droidloom_arm64/droidloom_arm64.mk"),
@@ -297,6 +300,8 @@ fn android_vendor_build_uses_the_safe_rust_composer_core() {
     // Hint sessions only help when HWUI opens them and the HAL acts on them.
     assert!(product.contains("android.hardware.power-service.droidloom"));
     assert!(!product.contains("android.hardware.power-service.example"));
+    // Location comes from the host through Droidloom's GNSS HAL.
+    assert!(product.contains("android.hardware.gnss-service.droidloom"));
     assert!(product.contains("debug.hwui.use_hint_manager=true"));
     assert!(product.contains("DroidloomConnectivityOverlay"));
     assert!(product.contains("android.hardware.ethernet.prebuilt.xml"));

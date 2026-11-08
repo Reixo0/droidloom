@@ -1073,6 +1073,25 @@ Per-Android-app volume,
 routing and microphone attribution are a later explicit milestone: AudioFlinger
 may mix apps before the HAL, so creating PipeWire nodes at HAL level alone does
 not expose each app. Additional framework stream/identity plumbing may be needed.
+
+### Location
+
+Android's GPS is the host's location. `android.hardware.gnss-service.droidloom`
+(a Rust GNSS AIDL V7 service in the vendor image, user `gps`) connects to
+`/dev/socket/droidloom/location` while Android's location provider runs a
+session, and reports each fix as a GNSS location. The socket is the inode of
+the user's `droidloom-location.socket` (`%t/droidloom/location.sock`), which the
+supervisor binds as it does audio's. `runtime/droidloom-location` authenticates
+the HAL's UID (1021) and asks geoclue for location as the desktop app
+`droidloom`, so the host's location switch, its per-app rules and its in-use
+indicator apply to Android as one app. When geoclue refuses, the HAL hears
+`DENIED` and Android gets no fix. Records are fixed 64-byte `DLLOC001`
+packets (`runtime/droidloom-location-protocol`).
+
+There are no satellites, raw measurements, NMEA, batching, geofences or
+assistance data: the host gives positions only, and those extensions are
+unsupported. The GNSS AIDL interface's Rust backend is enabled by
+`android/aosp-patches/0020-gnss-rust-backend.patch`.
 App labels supplied by a compromised cell are not trusted host identities.
 
 ### What Linux-generic means

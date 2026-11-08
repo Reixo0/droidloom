@@ -229,6 +229,17 @@ Production mapped identity, route/capability notifications and per-app host
 attribution remain unfinished. See [audio implementation](../audio-integration-proposal.md)
 and [threat model v2](../threat-model-v2.md).
 
+## Private location endpoint (DLLOC001)
+
+The user `droidloom-location.socket` unit owns `%t/droidloom/location.sock`
+under the same mode-0700 runtime directory. The supervisor may bind only that
+socket inode at `/dev/socket/droidloom/location`. The broker runs as the host
+user and authenticates the GNSS HAL's kernel-mapped UID (1021, `gps`). Records
+are exactly 64 bytes and carry `DLLOC001`: the HAL sends `START` with its
+interval and `STOP`; the host sends `FIX` records while started and `DENIED`
+when the host's location service refuses. Closing the socket stops the host
+session. Neither the system bus nor geoclue enters Android.
+
 ## Network
 
 Each cell owns a network namespace and one veth peer. Host policy assigns its

@@ -674,6 +674,21 @@ name = "droidloom-input-protocol"
 version = "0.1.0"
 
 [[package]]
+name = "droidloom-location"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "droidloom-denial-ipc",
+ "droidloom-location-protocol",
+ "libc",
+ "zbus",
+]
+
+[[package]]
+name = "droidloom-location-protocol"
+version = "0.1.0"
+
+[[package]]
 name = "droidloom-mesa"
 version = "0.1.0"
 dependencies = [
