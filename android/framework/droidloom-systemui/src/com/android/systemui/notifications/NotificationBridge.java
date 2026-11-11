@@ -79,7 +79,24 @@ public final class NotificationBridge extends NotificationListenerService implem
         disconnect();
     }
     @Override public void onNotificationPosted(StatusBarNotification sbn, RankingMap ranking) {
-        synchronized(lock) { put(sbn,ranking,true); dirty=true; lock.notifyAll(); }
+        boolean fresh;
+        synchronized(lock) { fresh=!active.containsKey(sbn.getKey()); put(sbn,ranking,true); fresh&=active.containsKey(sbn.getKey()); dirty=true; lock.notifyAll(); }
+        if(fresh) fullScreen(sbn,ranking);
+    }
+    /**
+     * SystemUI's full-screen intent: a ringing alarm or call opens its screen.
+     * Android cannot see whether the host is locked or in use, so it always
+     * opens; the host shows that window over its lock screen and wakes it.
+     */
+    private void fullScreen(StatusBarNotification sbn, RankingMap map) {
+        Notification n=sbn.getNotification();
+        if(n.fullScreenIntent==null) return;
+        Ranking rank=new Ranking();
+        if(map!=null && map.getRanking(sbn.getKey(),rank) && rank.getImportance()<NotificationManager.IMPORTANCE_HIGH) return;
+        try {
+            ActivityOptions options=ActivityOptions.makeBasic().setPendingIntentBackgroundActivityStartMode(ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED);
+            n.fullScreenIntent.send(context,0,null,null,null,null,options.toBundle());
+        } catch(Exception e) { Log.w(TAG,"Full-screen intent unavailable: "+e.getClass().getSimpleName()); }
     }
     @Override public void onNotificationRemoved(StatusBarNotification sbn) {
         synchronized(lock) { active.remove(sbn.getKey()); alerting.remove(sbn.getKey()); dirty=true; lock.notifyAll(); }
