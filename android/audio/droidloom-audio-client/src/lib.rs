@@ -63,15 +63,21 @@ impl Client {
         )
     }
     /// Connect and verify server identity, stream format and descriptor access.
-    pub fn connect(path: &Path, format: Format) -> io::Result<Self> {
-        match Self::connect_with_features(path, format, BURST_POSITION) {
-            // Version-1 brokers rejected OPEN's reserved feature field before
-            // creating a stream. Retry a fresh connection with the legacy format.
-            Err(error) if error.raw_os_error() == Some(libc::EPROTO) => {
-                Self::connect_with_features(path, format, 0)
+    pub fn connect(path: &Path, format: Format, role: Role) -> io::Result<Self> {
+        // Older brokers reject OPEN features they don't know before creating a
+        // stream: retry a fresh connection without the role, then without any.
+        let tries = [BURST_POSITION | role.features(), BURST_POSITION, 0];
+        let mut result = Err(io::Error::from_raw_os_error(libc::EPROTO));
+        for features in tries {
+            if role == Role::Media && features & STREAM_ROLE != 0 {
+                continue;
             }
-            result => result,
+            result = Self::connect_with_features(path, format, features);
+            if !matches!(&result, Err(error) if error.raw_os_error() == Some(libc::EPROTO)) {
+                break;
+            }
         }
+        result
     }
     fn connect_with_features(path: &Path, format: Format, features: u64) -> io::Result<Self> {
         format.validate()?;
@@ -322,6 +328,26 @@ pub unsafe extern "C" fn dl_audio_open(
     frames: u32,
     output: *mut *mut c_void,
 ) -> i32 {
+    // SAFETY: the same contract as dl_audio_open_role's.
+    unsafe { dl_audio_open_role(path, direction, rate, channels, frames, 0, output) }
+}
+
+/// Like `dl_audio_open`, for a stream that carries one kind of sound: a
+/// `Role` number, which the host gives a volume of its own.
+///
+/// # Safety
+///
+/// As for `dl_audio_open`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dl_audio_open_role(
+    path: *const c_char,
+    direction: u32,
+    rate: u32,
+    channels: u32,
+    frames: u32,
+    role: u32,
+    output: *mut *mut c_void,
+) -> i32 {
     if path.is_null() || output.is_null() {
         return -libc::EINVAL;
     }
@@ -334,6 +360,7 @@ pub unsafe extern "C" fn dl_audio_open(
         let path = unsafe { CStr::from_ptr(path) }
             .to_str()
             .map_err(|_| invalid("invalid audio path"))?;
+        let role = Role::from_wire(u64::from(role)).ok_or_else(|| invalid("unknown audio role"))?;
         let client = Client::connect(
             Path::new(path),
             Format {
@@ -342,6 +369,7 @@ pub unsafe extern "C" fn dl_audio_open(
                 channels,
                 frames,
             },
+            role,
         )?;
         // SAFETY: caller owns this box until dl_audio_close; output is writable.
         unsafe {

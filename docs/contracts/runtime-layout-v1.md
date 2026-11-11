@@ -218,6 +218,17 @@ offset and frame count until submit. Short capture reads retain the remainder.
 Malformed or stale commands and backend failure close that generation.
 The PipeWire callback performs no socket I/O, allocation or PCM copy.
 
+A playback OPEN may name the kind of sound it carries: the `STREAM_ROLE`
+feature with a role in `ROLE_MASK` (media, notification, ringtone, alarm,
+call), which the broker sets as the PipeWire stream's `media.role` (`Music`,
+`Notification`, `Ringtone`, `Alarm`, `Phone`) so the host gives each its own
+volume. Without it a stream is media. Android keeps the kinds apart: its audio
+policy has one BUS output per kind (`droidloom-host-output` for media,
+`droidloom-host-notification`, `-ringtone`, `-alarm`, `-call`), Droidloom's
+SystemUI routes the usages to them with an audio policy, and the HAL names
+each host stream by its output's address. A broker that rejects the role
+feature gets a retry without it.
+
 Capture requires an explicit host-user grant in addition to Android app
 permissions. Revocation by removing the grant and restarting the broker stops
 new sampling and closes old connections. It cannot erase delivered samples.

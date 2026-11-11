@@ -17,6 +17,14 @@ enum dl_audio_command {
 // until submit/close; capture pointers are read-only. Control requires no credit.
 int32_t dl_audio_open(const char *path, uint32_t direction, uint32_t rate,
     uint32_t channels, uint32_t frames, void **output);
+// The kind of sound a playback stream carries; the host gives each its own
+// volume. dl_audio_open opens media.
+enum dl_audio_role {
+    DL_AUDIO_MEDIA = 0, DL_AUDIO_NOTIFICATION = 1, DL_AUDIO_RINGTONE = 2,
+    DL_AUDIO_ALARM = 3, DL_AUDIO_CALL = 4
+};
+int32_t dl_audio_open_role(const char *path, uint32_t direction, uint32_t rate,
+    uint32_t channels, uint32_t frames, uint32_t role, void **output);
 void dl_audio_close(void *handle);
 int32_t dl_audio_acquire(void *handle, uint32_t requested, void **pointer, uint32_t *frames);
 int32_t dl_audio_submit(void *handle, uint32_t frames);

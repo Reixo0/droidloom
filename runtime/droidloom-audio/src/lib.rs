@@ -51,6 +51,7 @@ unsafe extern "C" {
         target: *const c_char,
         remote: *const c_char,
         name: *const c_char,
+        role: *const c_char,
         capture_sink: u32,
         output: *mut *mut c_void,
     ) -> i32;
@@ -68,7 +69,7 @@ struct Stream {
 }
 
 impl Stream {
-    fn open(format: Format, options: &Options, generation: u64) -> io::Result<Self> {
+    fn open(format: Format, role: Role, options: &Options, generation: u64) -> io::Result<Self> {
         static INITIALIZE: Once = Once::new();
         // SAFETY: PipeWire initialization is process-global and performed once.
         INITIALIZE.call_once(|| unsafe { dl_pw_init() });
@@ -93,6 +94,7 @@ impl Stream {
             }
         ))
         .unwrap();
+        let role = CString::new(role.media_role()).unwrap();
         let mut native = std::ptr::null_mut();
         // SAFETY: four mappings/FDs and strings remain live for the call; mappings
         // are retained in Stream until dl_pw_destroy has stopped every callback.
@@ -107,6 +109,7 @@ impl Stream {
                 target.as_ptr(),
                 remote.as_ptr(),
                 name.as_ptr(),
+                role.as_ptr(),
                 u32::from(options.capture_sink),
                 &mut native,
             )
@@ -229,8 +232,15 @@ pub fn serve_connection(socket: SeqPacket, options: &Options) -> io::Result<()> 
             return Err(error);
         }
     };
+    let role = match open.role() {
+        Ok(role) => role,
+        Err(error) => {
+            error_reply(&socket, open, &error);
+            return Err(error);
+        }
+    };
     let generation = generation()?;
-    let mut stream = match Stream::open(format, options, generation) {
+    let mut stream = match Stream::open(format, role, options, generation) {
         Ok(stream) => stream,
         Err(error) => {
             eprintln!(

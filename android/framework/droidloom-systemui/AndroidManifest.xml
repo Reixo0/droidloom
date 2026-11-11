@@ -9,6 +9,7 @@
     <uses-permission android:name="android.permission.ACCESS_KEYGUARD_SECURE_STORAGE" />
     <uses-permission android:name="android.permission.INTERACT_ACROSS_USERS_FULL" />
     <uses-permission android:name="android.permission.READ_CLIPBOARD_IN_BACKGROUND" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_ROUTING" />
     <application android:label="Droidloom SystemUI" android:persistent="true"
         android:allowBackup="false" android:allowClearUserData="false"
         android:hardwareAccelerated="false" android:directBootAware="true"

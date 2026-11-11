@@ -12,16 +12,43 @@
   microphone devices and has no default for a BUS input; the HAL sends it to
   the same bridge. Missing host endpoints and denied capture retain the timed
   silence fallback.
+
+  Each kind of sound with a volume of its own on the host has its own BUS
+  output, so Android never mixes them: media (and anything not routed
+  elsewhere), notifications, the ringtone, alarms and calls. Droidloom's
+  SystemUI routes the usages to them with an audio policy, as Android
+  Automotive routes to its buses, and the HAL names each host stream by its
+  BUS address.
 -->
 <module name="default" halVersion="3.0">
     <attachedDevices>
         <item>Droidloom Host Output</item>
+        <item>Droidloom Host Notification</item>
+        <item>Droidloom Host Ringtone</item>
+        <item>Droidloom Host Alarm</item>
+        <item>Droidloom Host Call</item>
         <item>Droidloom Host Input</item>
     </attachedDevices>
     <defaultOutputDevice>Droidloom Host Output</defaultOutputDevice>
     <mixPorts>
         <mixPort name="droidloom host output" role="source"
             flags="AUDIO_OUTPUT_FLAG_PRIMARY">
+            <profile name="" format="AUDIO_FORMAT_PCM_16_BIT"
+                samplingRates="48000" channelMasks="AUDIO_CHANNEL_OUT_STEREO"/>
+        </mixPort>
+        <mixPort name="droidloom host notification" role="source">
+            <profile name="" format="AUDIO_FORMAT_PCM_16_BIT"
+                samplingRates="48000" channelMasks="AUDIO_CHANNEL_OUT_STEREO"/>
+        </mixPort>
+        <mixPort name="droidloom host ringtone" role="source">
+            <profile name="" format="AUDIO_FORMAT_PCM_16_BIT"
+                samplingRates="48000" channelMasks="AUDIO_CHANNEL_OUT_STEREO"/>
+        </mixPort>
+        <mixPort name="droidloom host alarm" role="source">
+            <profile name="" format="AUDIO_FORMAT_PCM_16_BIT"
+                samplingRates="48000" channelMasks="AUDIO_CHANNEL_OUT_STEREO"/>
+        </mixPort>
+        <mixPort name="droidloom host call" role="source">
             <profile name="" format="AUDIO_FORMAT_PCM_16_BIT"
                 samplingRates="48000" channelMasks="AUDIO_CHANNEL_OUT_STEREO"/>
         </mixPort>
@@ -33,12 +60,28 @@
     <devicePorts>
         <devicePort tagName="Droidloom Host Output" type="AUDIO_DEVICE_OUT_BUS"
             role="sink" address="droidloom-host-output"/>
+        <devicePort tagName="Droidloom Host Notification" type="AUDIO_DEVICE_OUT_BUS"
+            role="sink" address="droidloom-host-notification"/>
+        <devicePort tagName="Droidloom Host Ringtone" type="AUDIO_DEVICE_OUT_BUS"
+            role="sink" address="droidloom-host-ringtone"/>
+        <devicePort tagName="Droidloom Host Alarm" type="AUDIO_DEVICE_OUT_BUS"
+            role="sink" address="droidloom-host-alarm"/>
+        <devicePort tagName="Droidloom Host Call" type="AUDIO_DEVICE_OUT_BUS"
+            role="sink" address="droidloom-host-call"/>
         <devicePort tagName="Droidloom Host Input" type="AUDIO_DEVICE_IN_BUILTIN_MIC"
             role="source" address="droidloom-host-input"/>
     </devicePorts>
     <routes>
         <route type="mix" sink="Droidloom Host Output"
             sources="droidloom host output"/>
+        <route type="mix" sink="Droidloom Host Notification"
+            sources="droidloom host notification"/>
+        <route type="mix" sink="Droidloom Host Ringtone"
+            sources="droidloom host ringtone"/>
+        <route type="mix" sink="Droidloom Host Alarm"
+            sources="droidloom host alarm"/>
+        <route type="mix" sink="Droidloom Host Call"
+            sources="droidloom host call"/>
         <route type="mix" sink="droidloom host input"
             sources="Droidloom Host Input"/>
     </routes>

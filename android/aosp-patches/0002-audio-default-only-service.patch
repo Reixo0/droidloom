@@ -377,7 +377,7 @@ index f4aeaa4..d9921da 100644
      // data than just total frame count. For example, the driver may correctly account
      // for any intermediate buffers.
 diff --git a/audio/aidl/default/include/core-impl/StreamPrimary.h b/audio/aidl/default/include/core-impl/StreamPrimary.h
-index 87dcc3b..a717d36 100644
+index 87dcc3b..602b8a8 100644
 --- a/audio/aidl/default/include/core-impl/StreamPrimary.h
 +++ b/audio/aidl/default/include/core-impl/StreamPrimary.h
 @@ -24,6 +24,9 @@
@@ -402,7 +402,7 @@ index 87dcc3b..a717d36 100644
  
      // Overridden methods of 'StreamCommonImpl', called on a Binder thread.
      ndk::ScopedAStatus setConnectedDevices(const ConnectedDevices& devices) override;
-@@ -71,6 +79,16 @@ class StreamPrimary : public StreamAlsaMonoPipe {
+@@ -71,6 +79,19 @@ class StreamPrimary : public StreamAlsaMonoPipe {
      bool isStubStreamOnWorker() const { return mCurrAlsaDeviceId == kStubDeviceId; }
  
      DriverStubImpl mStubDriver;
@@ -415,12 +415,15 @@ index 87dcc3b..a717d36 100644
 +    uint32_t mHostBufferFrames = 0;
 +    uint32_t mHostTransferredFrames = 0;
 +    int64_t mHostFrameOffset = 0;
++    // The kind of sound this output carries, from its BUS device's address:
++    // set on a Binder thread, read when the worker opens the host stream.
++    std::atomic<uint32_t> mHostRole{DL_AUDIO_MEDIA};
 +#endif
      mutable std::mutex mLock;
      AlsaDeviceId mAlsaDeviceId GUARDED_BY(mLock) = kStubDeviceId;
  
 diff --git a/audio/aidl/default/primary/StreamPrimary.cpp b/audio/aidl/default/primary/StreamPrimary.cpp
-index ac0d302..2b823f9 100644
+index ac0d302..13f4e77 100644
 --- a/audio/aidl/default/primary/StreamPrimary.cpp
 +++ b/audio/aidl/default/primary/StreamPrimary.cpp
 @@ -52,10 +52,16 @@ StreamPrimary::StreamPrimary(StreamContext* context, const Metadata& metadata)
@@ -457,16 +460,17 @@ index ac0d302..2b823f9 100644
      return isStubStreamOnWorker() ? mStubDriver.standby() : StreamAlsaMonoPipe::standby();
  }
  
-@@ -83,6 +95,23 @@ StreamPrimary::StreamPrimary(StreamContext* context, const Metadata& metadata)
+@@ -83,6 +95,24 @@ StreamPrimary::StreamPrimary(StreamContext* context, const Metadata& metadata)
          StreamAlsaMonoPipe::shutdown();  // Close currently opened ALSA devices.
      }
      if (isStub) {
 +#ifdef DROIDLOOM_AUDIO_DEFAULT_ONLY
 +        if (!mHostAudio) {
-+            const int status = dl_audio_open("/dev/socket/droidloom/audio",
++            const int status = dl_audio_open_role("/dev/socket/droidloom/audio",
 +                    mIsInput ? DL_AUDIO_CAPTURE : DL_AUDIO_PLAYBACK,
 +                    mContext.getSampleRate(), mFrameSizeBytes / sizeof(int16_t),
-+                    mIsInput ? 1024 : 8192, &mHostAudio);
++                    mIsInput ? 1024 : 8192, mIsInput ? DL_AUDIO_MEDIA : mHostRole.load(),
++                    &mHostAudio);
 +            // An older host or a denied microphone keeps the timing-only
 +            // fallback quietly. Any other failure is reported, then the
 +            // stream plays timing-only until its next start.
@@ -481,7 +485,7 @@ index ac0d302..2b823f9 100644
          return mStubDriver.start();
      }
      RETURN_STATUS_IF_ERROR(StreamAlsaMonoPipe::start());
-@@ -94,6 +123,30 @@ StreamPrimary::StreamPrimary(StreamContext* context, const Metadata& metadata)
+@@ -94,6 +124,30 @@ StreamPrimary::StreamPrimary(StreamContext* context, const Metadata& metadata)
  
  ::android::status_t StreamPrimary::transfer(void* buffer, size_t frameCount,
                                              size_t* actualFrameCount, int32_t* latencyMs) {
@@ -512,7 +516,7 @@ index ac0d302..2b823f9 100644
      if (isStubStreamOnWorker()) {
          return mStubDriver.transfer(buffer, frameCount, actualFrameCount, latencyMs);
      }
-@@ -130,17 +183,80 @@ StreamPrimary::StreamPrimary(StreamContext* context, const Metadata& metadata)
+@@ -130,19 +184,104 @@ StreamPrimary::StreamPrimary(StreamContext* context, const Metadata& metadata)
      return ::android::OK;
  }
  
@@ -591,10 +595,34 @@ index ac0d302..2b823f9 100644
 +}
 +#endif
 +
++#ifdef DROIDLOOM_AUDIO_DEFAULT_ONLY
++namespace {
++// Android's audio policy sends each kind of sound to its own BUS output
++// (audio_policy_configuration.xml); the host gives each its own volume.
++uint32_t hostRole(const std::vector<AudioDevice>& devices) {
++    using ::aidl::android::media::audio::common::AudioDeviceAddress;
++    if (devices.empty() || devices[0].address.getTag() != AudioDeviceAddress::id) {
++        return DL_AUDIO_MEDIA;
++    }
++    const std::string& address = devices[0].address.get<AudioDeviceAddress::id>();
++    if (address == "droidloom-host-notification") return DL_AUDIO_NOTIFICATION;
++    if (address == "droidloom-host-ringtone") return DL_AUDIO_RINGTONE;
++    if (address == "droidloom-host-alarm") return DL_AUDIO_ALARM;
++    if (address == "droidloom-host-call") return DL_AUDIO_CALL;
++    return DL_AUDIO_MEDIA;
++}
++}  // namespace
++#endif
++
  ndk::ScopedAStatus StreamPrimary::setConnectedDevices(const ConnectedDevices& devices) {
      LOG(DEBUG) << __func__ << ": " << ::android::internal::ToString(devices);
++#ifdef DROIDLOOM_AUDIO_DEFAULT_ONLY
++    if (!mIsInput) mHostRole.store(hostRole(devices));
++#endif
      if (devices.size() > 1) {
-@@ -203,9 +319,12 @@ bool StreamPrimary::useStubStream(
+         LOG(ERROR) << __func__ << ": primary stream can only be connected to one device, got: "
+                    << devices.size();
+@@ -203,9 +342,12 @@ bool StreamPrimary::useStubStream(
      if (isInput) {
          return kSimulateInput || device.type.type == AudioDeviceType::IN_TELEPHONY_RX ||
                 device.type.type == AudioDeviceType::IN_FM_TUNER ||

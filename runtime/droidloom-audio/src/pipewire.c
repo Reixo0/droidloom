@@ -148,7 +148,7 @@ void dl_pw_destroy(struct dl_pw *p) {
 
 int dl_pw_open(uint32_t direction, uint32_t rate, uint32_t channels, uint32_t bytes,
         const int *fds, void *const *samples, const char *target, const char *remote,
-        const char *name, uint32_t capture_sink, struct dl_pw **output) {
+        const char *name, const char *role, uint32_t capture_sink, struct dl_pw **output) {
     *output = NULL;
     struct dl_pw *p = calloc(1, sizeof(*p));
     if (!p) return -ENOMEM;
@@ -160,7 +160,7 @@ int dl_pw_open(uint32_t direction, uint32_t rate, uint32_t channels, uint32_t by
     if (!p->loop) { dl_pw_destroy(p); return -ENOMEM; }
     struct pw_properties *props = pw_properties_new(
         PW_KEY_MEDIA_TYPE, "Audio", PW_KEY_MEDIA_CATEGORY, direction == 1 ? "Playback" : "Capture",
-        PW_KEY_MEDIA_ROLE, "Music", PW_KEY_NODE_NAME, name,
+        PW_KEY_MEDIA_ROLE, role, PW_KEY_NODE_NAME, name,
         PW_KEY_NODE_DESCRIPTION, "Droidloom Android audio",
         "adapter.auto-port-config", "{ mode = dsp }",
         PW_KEY_NODE_LATENCY, "256/48000", PW_KEY_NODE_PAUSE_ON_IDLE, "true", NULL);

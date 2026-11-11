@@ -313,6 +313,7 @@ context.objects = [
                 channels: self.channels,
                 frames,
             },
+            Role::Media,
         )
         .unwrap();
         (client, worker)
@@ -726,6 +727,7 @@ fn capture_is_rejected_before_allocating_or_connecting_pipewire() {
             channels: 1,
             frames: 1024,
         },
+        Role::Media,
     );
     assert_eq!(result.err().unwrap().raw_os_error(), Some(libc::EACCES));
     assert_eq!(
@@ -837,7 +839,8 @@ fn peer_uid_is_checked_before_pipewire_is_opened() {
                 rate: RATE,
                 channels: 1,
                 frames: 1024
-            }
+            },
+            Role::Media
         )
         .is_err()
     );
@@ -882,6 +885,7 @@ fn broker_accepts_systemd_socket_activation() {
             channels: 1,
             frames: 1024,
         },
+        Role::Media,
     );
     let _ = child.kill();
     let _ = child.wait();

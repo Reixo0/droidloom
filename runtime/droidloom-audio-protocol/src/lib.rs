@@ -49,6 +49,61 @@ pub const STANDBY: u64 = 5;
 pub const SHARED_POOL: u64 = 1;
 /// Optional OPEN/CONFIG feature: timing snapshots on buffer exchanges.
 pub const BURST_POSITION: u64 = 1 << 1;
+/// OPEN feature: the stream names the kind of sound it carries, in
+/// `ROLE_MASK`. Without it a stream is media.
+pub const STREAM_ROLE: u64 = 1 << 2;
+const ROLE_SHIFT: u32 = 8;
+/// OPEN feature field: the stream's `Role`.
+pub const ROLE_MASK: u64 = 0xf << ROLE_SHIFT;
+
+/// The kind of sound a playback stream carries, which the host gives a
+/// volume of its own: Android's audio policy sends each kind to its own
+/// output.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum Role {
+    /// Music, video, games and anything else.
+    Media = 0,
+    /// Notifications and other short event sounds.
+    Notification = 1,
+    /// An incoming call ringing.
+    Ringtone = 2,
+    /// Alarms.
+    Alarm = 3,
+    /// Voice and video calls.
+    Call = 4,
+}
+
+impl Role {
+    const ALL: [Self; 5] = [
+        Self::Media,
+        Self::Notification,
+        Self::Ringtone,
+        Self::Alarm,
+        Self::Call,
+    ];
+
+    /// A role from its number, as the HAL passes it.
+    pub fn from_wire(value: u64) -> Option<Self> {
+        Self::ALL.into_iter().find(|role| *role as u64 == value)
+    }
+
+    /// OPEN's feature bits for this role.
+    pub fn features(self) -> u64 {
+        STREAM_ROLE | ((self as u64) << ROLE_SHIFT)
+    }
+
+    /// PipeWire's media.role, which the host's session manager routes by.
+    pub fn media_role(self) -> &'static str {
+        match self {
+            Self::Media => "Music",
+            Self::Notification => "Notification",
+            Self::Ringtone => "Ringtone",
+            Self::Alarm => "Alarm",
+            Self::Call => "Phone",
+        }
+    }
+}
 
 /// Pack a bounded credit into one field, leaving four fields for position.
 /// Slot and frame count occupy 16 bits each; byte offset occupies 32 bits.
@@ -171,9 +226,24 @@ impl Record {
             values,
         })
     }
+    /// The role OPEN names: media when it names none.
+    pub fn role(self) -> io::Result<Role> {
+        let features = self.values[4];
+        if features & STREAM_ROLE == 0 {
+            return match features & ROLE_MASK {
+                0 => Ok(Role::Media),
+                _ => Err(invalid("audio role without the role feature")),
+            };
+        }
+        Role::from_wire((features & ROLE_MASK) >> ROLE_SHIFT)
+            .ok_or_else(|| invalid("unknown audio role"))
+    }
     /// Parse the opening format without narrowing untrusted integers.
     pub fn format(self) -> io::Result<Format> {
-        if self.op != OPEN || self.generation != 0 || self.values[4] & !BURST_POSITION != 0 {
+        if self.op != OPEN
+            || self.generation != 0
+            || self.values[4] & !(BURST_POSITION | STREAM_ROLE | ROLE_MASK) != 0
+        {
             return Err(invalid("invalid audio open request"));
         }
         Format {
@@ -345,6 +415,27 @@ pub fn socket_timeout(socket: &SeqPacket, milliseconds: i64) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn open_names_its_role() {
+        let mut open = Record {
+            op: OPEN,
+            request: 1,
+            generation: 0,
+            values: [1, 48_000, 2, 1024, BURST_POSITION],
+        };
+        assert_eq!(open.role().unwrap(), Role::Media);
+        for role in Role::ALL {
+            open.values[4] = BURST_POSITION | role.features();
+            assert!(open.format().is_ok());
+            assert_eq!(open.role().unwrap(), role);
+        }
+        open.values[4] = STREAM_ROLE | (9 << ROLE_SHIFT);
+        assert!(open.role().is_err());
+        open.values[4] = 3 << ROLE_SHIFT;
+        assert!(open.role().is_err());
+        open.values[4] = 1 << 20;
+        assert!(open.format().is_err());
+    }
     #[test]
     fn rejects_wrong_version_lengths_and_format_overflow() {
         let open = Record {

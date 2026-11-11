@@ -108,7 +108,7 @@ fn fixture(
             }
         }
     });
-    let client = Client::connect(&path, format).unwrap();
+    let client = Client::connect(&path, format, Role::Media).unwrap();
     (directory, client, worker)
 }
 
