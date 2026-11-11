@@ -483,6 +483,9 @@ impl App {
                 })
                 .map(|(object, _)| self.task_refresh_millihz(*object))
                 .max()
+                // With no app shown, an app about to open reads the cadence
+                // to pick its frame rate: the host's, not 60 Hz.
+                .or_else(|| self.host_refresh_millihz())
                 .unwrap_or(60_000);
         }
         select_surface_refresh(
@@ -490,6 +493,14 @@ impl App {
             task.presentation_output.as_ref(),
             |output| self.output_refresh_millihz(output),
         )
+    }
+
+    /// The fastest refresh among the host's outputs.
+    fn host_refresh_millihz(&self) -> Option<u32> {
+        self.output_state
+            .outputs()
+            .filter_map(|output| self.output_refresh_millihz(&output))
+            .max()
     }
 
     fn output_refresh_millihz(&self, output: &wl_output::WlOutput) -> Option<u32> {
