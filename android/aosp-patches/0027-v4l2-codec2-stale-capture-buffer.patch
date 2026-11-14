@@ -1,0 +1,20 @@
+diff --git a/v4l2/V4L2Decoder.cpp b/v4l2/V4L2Decoder.cpp
+index 182c196..e855cc4 100644
+--- a/v4l2/V4L2Decoder.cpp
++++ b/v4l2/V4L2Decoder.cpp
+@@ -661,8 +661,13 @@ void V4L2Decoder::serviceDeviceTask(bool event) {
+ 
+         // Get the corresponding VideoFrame of the dequeued buffer.
+         auto it = mFrameAtDevice.find(bufferId);
+-        ALOG_ASSERT(it != mFrameAtDevice.end(), "buffer %zu is not found at mFrameAtDevice",
+-                    bufferId);
++        if (it == mFrameAtDevice.end()) {
++            // The driver can hand back a capture buffer queued before a flush
++            // or a resolution change. Erasing end() crashes the service, so
++            // drop the stale buffer instead.
++            ALOGW("Ignoring output buffer %zu that is not at the device", bufferId);
++            continue;
++        }
+         auto frame = std::move(it->second);
+         mFrameAtDevice.erase(it);
+ 

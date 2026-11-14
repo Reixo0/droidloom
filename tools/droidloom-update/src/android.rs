@@ -168,6 +168,10 @@ const PATCHES: &[(&str, &str)] = &[
         "android/aosp-patches/0026-v4l2-codec2-igba-surface-buffers.patch",
     ),
     (
+        "external/v4l2_codec2",
+        "android/aosp-patches/0027-v4l2-codec2-stale-capture-buffer.patch",
+    ),
+    (
         "frameworks/av",
         "android/audio/0001-host-buffered-playback.patch",
     ),

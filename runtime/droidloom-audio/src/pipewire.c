@@ -31,6 +31,24 @@ struct dl_pw {
 };
 
 struct dl_region { uint32_t slot, frames, offset; };
+
+// pw_time.queued is the difference of two counters. Right after a flush it
+// drops below zero and, being unsigned, wraps to a huge value. Count a
+// negative queue as empty.
+static uint64_t time_pending(const struct pw_time *time) {
+    int64_t queued = (int64_t)time->queued, buffered = (int64_t)time->buffered;
+    return (uint64_t)(queued > 0 ? queued : 0) + (uint64_t)(buffered > 0 ? buffered : 0);
+}
+
+// Frames already past the stream, in the graph and the device. They are
+// played whatever Android does next. Delay is in graph ticks; without a
+// graph rate (paused) count them at the stream rate.
+static uint64_t time_delay_frames(const struct pw_time *time, uint32_t rate) {
+    if (time->delay <= 0) return 0;
+    if (!time->rate.denom) return (uint64_t)time->delay;
+    return (uint64_t)time->delay * time->rate.num * rate / time->rate.denom;
+}
+
 struct dl_position { uint64_t frames, monotonic_ns, latency_ns, discontinuities; };
 
 static void state_changed(void *opaque, enum pw_stream_state old,
@@ -226,7 +244,7 @@ int dl_pw_acquire(struct dl_pw *p, uint32_t requested, struct dl_region *region)
             int status = pw_stream_get_time_n(p->stream, &time, sizeof(time));
             if (status == 0 || (status == -EIO && p->state == PW_STREAM_STATE_PAUSED)) {
                 uint64_t period = time.size > requested ? time.size : requested;
-                room = time.queued + time.buffered <= period;
+                room = time_pending(&time) <= period;
             }
         }
         if (room && (b = pw_stream_dequeue_buffer(p->stream)) != NULL) break;
@@ -392,8 +410,14 @@ int dl_pw_control(struct dl_pw *p, uint64_t command) {
         // -EIO until the graph is streaming. Flush/standby are valid here.
         if (result == -EIO && p->state == PW_STREAM_STATE_PAUSED) result = 0;
         if (!result) {
-            dropped = time.queued + time.buffered + p->playback_filled;
+            // Flush and standby discard what is still queued. Frames already
+            // in the graph and the device still play, so they stay countable
+            // as presented; dropping them would put Android's position behind
+            // the speaker for good, a little more at every pause.
+            dropped = time_pending(&time) + p->playback_filled;
             uint64_t remaining = p->submitted - p->dropped - p->presented;
+            uint64_t in_device = time_delay_frames(&time, p->rate);
+            remaining = remaining > in_device ? remaining - in_device : 0;
             if (dropped > remaining) dropped = remaining;
         }
         if (!result && p->playback_buffer) {
@@ -451,13 +475,13 @@ int dl_pw_position(struct dl_pw *p, struct dl_position *out) {
     if (!result && time.rate.denom) {
         uint64_t graph_delay_ns = time.delay > 0 ?
             (uint64_t)time.delay * time.rate.num * 1000000000 / time.rate.denom : 0;
-        uint64_t pending = time.queued + time.buffered + p->playback_filled
+        uint64_t pending = time_pending(&time) + p->playback_filled
             + graph_delay_ns * p->rate / 1000000000;
         uint64_t eligible = p->submitted - p->dropped;
         uint64_t frames = p->direction == 1 ? (eligible > pending ? eligible - pending : 0) : p->captured;
         if (frames < p->presented) frames = p->presented;
         p->presented = frames;
-        p->latency_ns = (time.queued + time.buffered + p->playback_filled)
+        p->latency_ns = (time_pending(&time) + p->playback_filled)
             * 1000000000 / p->rate + graph_delay_ns;
         *out = (struct dl_position){ frames, ns, p->latency_ns, p->discontinuities };
     } else if (!result) result = -EAGAIN;
