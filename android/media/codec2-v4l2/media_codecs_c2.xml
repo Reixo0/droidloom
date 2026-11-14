@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<!-- The host's V4L2 stateful decoders (android.hardware.media.c2-service.
+     droidloom-v4l2). Rank 128 puts them ahead of Android's software decoders
+     (0x200); a format the host has no decoder for is not offered by the
+     store, so its entry here stays unused. -->
+<MediaCodecs>
+    <Decoders>
+        <MediaCodec name="c2.v4l2.avc.decoder" type="video/avc" rank="128">
+            <Limit name="size" min="16x16" max="4096x4096" />
+            <Limit name="alignment" value="2x2" />
+            <Limit name="block-size" value="16x16" />
+            <Limit name="blocks-per-second" min="1" max="1958400" />
+            <Limit name="bitrate" range="1-120000000" />
+            <Limit name="concurrent-instances" max="8" />
+            <Limit name="performance-point-3840x2160" range="30-30" />
+            <Feature name="adaptive-playback" />
+        </MediaCodec>
+        <MediaCodec name="c2.v4l2.hevc.decoder" type="video/hevc" rank="128">
+            <Limit name="size" min="16x16" max="4096x4096" />
+            <Limit name="alignment" value="2x2" />
+            <Limit name="block-size" value="16x16" />
+            <Limit name="blocks-per-second" min="1" max="1958400" />
+            <Limit name="bitrate" range="1-120000000" />
+            <Limit name="concurrent-instances" max="8" />
+            <Limit name="performance-point-3840x2160" range="30-30" />
+            <Feature name="adaptive-playback" />
+        </MediaCodec>
+        <MediaCodec name="c2.v4l2.vp9.decoder" type="video/x-vnd.on2.vp9" rank="128">
+            <Limit name="size" min="16x16" max="4096x4096" />
+            <Limit name="alignment" value="2x2" />
+            <Limit name="block-size" value="16x16" />
+            <Limit name="blocks-per-second" min="1" max="1958400" />
+            <Limit name="bitrate" range="1-120000000" />
+            <Limit name="concurrent-instances" max="8" />
+            <Limit name="performance-point-3840x2160" range="30-30" />
+            <Feature name="adaptive-playback" />
+        </MediaCodec>
+    </Decoders>
+</MediaCodecs>

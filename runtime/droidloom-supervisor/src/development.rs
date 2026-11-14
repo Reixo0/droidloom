@@ -55,6 +55,13 @@ const CAMERA_DEVICES: [(&str, &str); 2] = [
 /// Android's cameraserver user and camera group, which run the camera HAL.
 const AID_CAMERASERVER: u32 = 1047;
 const AID_CAMERA: u32 = 1006;
+/// The host's video decoder for the V4L2 Codec2 service: the V4L2 memory to
+/// memory device whose kernel `name` ends with this (qcom-iris-decoder,
+/// qcom-venus-decoder), which the cell sees after the cameras.
+const VIDEO_DECODER_NAME_SUFFIX: &str = "-decoder";
+const VIDEO_DECODER_TARGET: &str = "dev/video2";
+/// Android's mediacodec user and group, which run the Codec2 services.
+const AID_MEDIA_CODEC: u32 = 1046;
 const ANDROID_RENDER_NODE: &str = "renderD128";
 const ANDROID_CGROUPS_TARGET: &str = "system/etc/cgroups.json";
 const DEVELOPMENT_CGROUPS: &str = include_str!("../assets/development-cgroups.json");
@@ -2002,6 +2009,12 @@ fn create_private_dev(spec: &CellSpec, root: &Path) -> Result<(), DevelopmentErr
             eprintln!("droidloom-supervisor: no {name} for Android: {error}");
         }
     }
+    // Hardware video decoding: the host's decoder, for mediacodec alone.
+    if let Some(device) = video_device_named_suffix(VIDEO_DECODER_NAME_SUFFIX) {
+        if let Err(error) = create_video_decoder_device(root, &device) {
+            eprintln!("droidloom-supervisor: no video decoder for Android: {error}");
+        }
+    }
 
     let denial_target = root.join(ANDROID_DENIAL_SOCKET);
     create_mount_target(&denial_target)?;
@@ -2083,6 +2096,28 @@ fn video_device_named(name: &str) -> Option<PathBuf> {
         .collect();
     found.sort();
     found.into_iter().next()
+}
+
+/// The host's first V4L2 device whose kernel name ends with `suffix`.
+fn video_device_named_suffix(suffix: &str) -> Option<PathBuf> {
+    let mut found: Vec<PathBuf> = fs::read_dir("/sys/class/video4linux")
+        .ok()?
+        .flatten()
+        .filter(|entry| {
+            fs::read_to_string(entry.path().join("name"))
+                .is_ok_and(|text| text.trim_end().ends_with(suffix))
+        })
+        .map(|entry| Path::new("/dev").join(entry.file_name()))
+        .collect();
+    found.sort();
+    found.into_iter().next()
+}
+
+fn create_video_decoder_device(root: &Path, device: &Path) -> Result<(), DevelopmentError> {
+    let (major, minor) = auxiliary_graphics_device_numbers(device)?;
+    let target = root.join(VIDEO_DECODER_TARGET);
+    make_device_node(&target, "c", major, minor, "660")?;
+    set_owner(&target, AID_MEDIA_CODEC, AID_MEDIA_CODEC)
 }
 
 fn create_camera_device(root: &Path, device: &Path, target: &str) -> Result<(), DevelopmentError> {

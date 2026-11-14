@@ -293,7 +293,9 @@ fn android_vendor_build_uses_the_safe_rust_composer_core() {
     assert!(android_bp.contains("name: \"android.hardware.nfc-service.droidloom\""));
     assert!(android_bp.contains("\"android.hardware.nfc-V2-rust\""));
     assert!(android_bp.contains("name: \"droidloom-external-camera-config\""));
-    assert_eq!(android_bp.matches("vendor: true").count(), 23);
+    assert!(android_bp.contains("name: \"android.hardware.media.c2-service.droidloom-v4l2\""));
+    assert!(android_bp.contains("name: \"droidloom-media-codecs-c2\""));
+    assert_eq!(android_bp.matches("vendor: true").count(), 25);
 
     let product = fs::read_to_string(
         repository_root().join("android/device/droidloom_arm64/droidloom_arm64.mk"),
@@ -309,6 +311,9 @@ fn android_vendor_build_uses_the_safe_rust_composer_core() {
     // Location comes from the host through Droidloom's GNSS HAL.
     assert!(product.contains("android.hardware.gnss-service.droidloom"));
     assert!(product.contains("android.hardware.sensors-service.droidloom"));
+    // Video decodes on the host's V4L2 decoder through Codec2.
+    assert!(product.contains("android.hardware.media.c2-service.droidloom-v4l2"));
+    assert!(product.contains("PRODUCT_SOONG_NAMESPACES += external/v4l2_codec2"));
     // NFC is the host controller's raw NCI, when the host has one.
     assert!(product.contains("android.hardware.nfc-service.droidloom"));
     // Cameras are the host's, fed as MJPEG to AOSP's external camera HAL.

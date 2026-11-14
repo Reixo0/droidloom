@@ -247,6 +247,36 @@ rust_binary {
     ],
 }
 
+// Codec2 AIDL IComponentStore/default on the host's V4L2 stateful decoders
+// (external/v4l2_codec2's store; its own service is HIDL only).
+cc_binary {
+    name: "android.hardware.media.c2-service.droidloom-v4l2",
+    vendor: true,
+    relative_install_path: "hw",
+    defaults: ["libcodec2-aidl-defaults"],
+    srcs: ["android/media/codec2-v4l2/service.cpp"],
+    init_rc: ["android/device/droidloom_arm64/droidloom-codec2.rc"],
+    vintf_fragments: ["android/device/droidloom_arm64/droidloom-codec2.xml"],
+    shared_libs: [
+        // Namespaced: referenced by its soong_namespace directory.
+        "//external/v4l2_codec2:libv4l2_codec2_v4l2",
+        "libbase",
+        "libbinder_ndk",
+        "libcodec2_vndk",
+        "liblog",
+        "libutils",
+    ],
+    header_libs: ["libcodec2_internal"],
+    required: ["droidloom-media-codecs-c2"],
+}
+
+prebuilt_etc {
+    name: "droidloom-media-codecs-c2",
+    vendor: true,
+    src: "android/media/codec2-v4l2/media_codecs_c2.xml",
+    filename: "media_codecs_c2.xml",
+}
+
 // Safe fixed-record encoder used after Denial has selected one Android task.
 rust_library {
     name: "libdroidloom_input_protocol",

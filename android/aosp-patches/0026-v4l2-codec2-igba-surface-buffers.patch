@@ -1,0 +1,16 @@
+diff --git a/components/VideoFramePool.cpp b/components/VideoFramePool.cpp
+index 9927acf..d3fddb2 100644
+--- a/components/VideoFramePool.cpp
++++ b/components/VideoFramePool.cpp
+@@ -36,6 +36,11 @@ std::optional<uint32_t> VideoFramePool::getBufferIdFromGraphicBlock(C2BlockPool&
+     switch (blockPool.getAllocatorId()) {
+     case V4L2AllocatorId::SECURE_GRAPHIC:
+         FALLTHROUGH;
++    // The AIDL HAL hands surface buffers out through IGraphicBufferAllocator
++    // (C2AllocatorAhwb); its handle starts with the gralloc handle's fds, as
++    // BUFFERQUEUE's does.
++    case C2PlatformAllocatorStore::IGBA:
++        FALLTHROUGH;
+     case C2PlatformAllocatorStore::BUFFERQUEUE: {
+         auto dmabufId = android::getDmabufId(block.handle()->data[0]);
+         if (!dmabufId) {

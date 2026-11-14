@@ -8,6 +8,8 @@ PRODUCT_MODEL := Droidloom ARM64 cell
 PRODUCT_MANUFACTURER := Droidloom
 
 PRODUCT_SOONG_NAMESPACES += vendor/droidloom
+# Codec2 components on the host's V4L2 decoders (hardware video decoding)
+PRODUCT_SOONG_NAMESPACES += external/v4l2_codec2
 
 PRODUCT_BUILD_SYSTEM_IMAGE := false
 PRODUCT_BUILD_SYSTEM_OTHER_IMAGE := false
@@ -46,6 +48,8 @@ PRODUCT_PACKAGES += \
     android.hardware.power-service.droidloom \
     android.hardware.gnss-service.droidloom \
     android.hardware.sensors-service.droidloom \
+    android.hardware.media.c2-service.droidloom-v4l2 \
+    libc2plugin_store \
     android.hardware.nfc-service.droidloom \
     android.hardware.camera.provider-V1-external-service \
     droidloom-external-camera-config \
@@ -96,9 +100,15 @@ PRODUCT_COPY_FILES += \
 # Android's stream volumes start at full scale; the host mixer owns loudness.
 # Codec2 clients use the AIDL software store: the cell has no hwservicemanager,
 # so the default HIDL selection leaves apps with the in-process audio codecs.
+# The V4L2 store (default) takes linear buffers from DMA-BUF heaps (BLOB) and
+# its own V4L2 buffer pools (libc2plugin_store); 8 decoders at a time, as its
+# media_codecs_c2.xml says.
 PRODUCT_VENDOR_PROPERTIES += \
     debug.hwui.use_hint_manager=true \
     media.c2.hal.selection=aidl \
+    debug.stagefright.c2-poolmask=0xfc0000 \
+    ro.vendor.v4l2_codec2.decode_concurrent_instances=8 \
+    ro.vendor.v4l2_codec2.encode_concurrent_instances=0 \
     debug.sf.use_phase_offsets_as_durations=1 \
     debug.sf.late.app.duration=9333333 \
     debug.sf.early.app.duration=15666666 \

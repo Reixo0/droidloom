@@ -277,6 +277,12 @@
       "purpose": "Pinned Chromium base utilities required by Android snapshot initialization"
     },
     {
+      "path": "external/v4l2_codec2",
+      "name": "platform/external/v4l2_codec2",
+      "commit": "1226adff48e591f0b6cac8d3a271a7324d8fc0ec",
+      "purpose": "Codec2 components on the host's V4L2 stateful decoders, for hardware video decoding"
+    },
+    {
       "path": "external/libchrome-gestures",
       "name": "platform/external/libchrome-gestures",
       "commit": "6c2310952338e9f094a1aeb6a83f7356ff5d6042",
@@ -765,6 +771,7 @@
         "common/fmq/aidl",
         "common/support",
         "drm/common/aidl",
+        "drm/aidl",
         "graphics/allocator/2.0",
         "graphics/allocator/3.0",
         "graphics/allocator/4.0",

@@ -1,0 +1,20 @@
+diff --git a/v4l2/V4L2Decoder.cpp b/v4l2/V4L2Decoder.cpp
+index 182c196..3eaf568 100644
+--- a/v4l2/V4L2Decoder.cpp
++++ b/v4l2/V4L2Decoder.cpp
+@@ -297,6 +297,15 @@ bool V4L2Decoder::startOutputQueue(size_t minOutputBuffersCount, enum v4l2_memor
+     *numOutputBuffers = std::max(*numOutputBuffers, minOutputBuffersCount);
+ 
+     const ui::Size codedSize(format->fmt.pix_mp.width, format->fmt.pix_mp.height);
++    // The stateful decoder API sets the CAPTURE format on a queue with no
++    // buffers: stop and free the old ones first (drivers like Qualcomm's
++    // iris answer EBUSY otherwise).
++    if (mOutputQueue->isStreaming()) {
++        mOutputQueue->streamoff();
++    }
++    if (mOutputQueue->allocatedBuffersCount() > 0) {
++        mOutputQueue->deallocateBuffers();
++    }
+     if (!setupOutputFormat(codedSize)) {
+         return false;
+     }

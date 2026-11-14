@@ -1114,6 +1114,28 @@ the heading's calibration. There is no direct channel, batching or data
 injection. The sensors AIDL interface's Rust backend is enabled by
 `android/aosp-patches/0022-sensors-rust-backend.patch`.
 
+### Hardware video decoding
+
+Video decodes on the host's V4L2 stateful decoder. When the host has one (a
+V4L2 device whose kernel name ends with `-decoder`, such as `qcom-iris-decoder`),
+the supervisor creates it in the cell as `/dev/video2`, for Android's
+`mediacodec` user (1046) alone. `android.hardware.media.c2-service.droidloom-v4l2`
+(`android/media/codec2-v4l2`) registers Codec2's AIDL
+`IComponentStore/default` on AOSP's `external/v4l2_codec2` store; that
+project's own service is HIDL only, and the cell has no hwservicemanager. It
+runs without the `camera` group: the store opens every `/dev/video*` it may,
+and opening a camera node would start the host's camera.
+
+`media_codecs_c2.xml` lists `c2.v4l2.avc.decoder`, `c2.v4l2.hevc.decoder` and
+`c2.v4l2.vp9.decoder` at rank 128, ahead of Android's software decoders
+(0x200); a format the host cannot decode is not offered by the store. There
+are no encoders yet. Patches 0023 to 0026 adapt `v4l2_codec2` to drivers that
+follow the stateful API strictly (Qualcomm's iris) and to Android 17: an
+unknown input size is 0x0, not `ui::Size()`'s -1x-1; bitstream buffers are 8
+MiB, as iris sizes every one for 4K; the CAPTURE buffers are freed before its
+format changes; and surface buffers from the AIDL HAL's
+IGraphicBufferAllocator (IGBA) are recognised like BUFFERQUEUE's.
+
 ### NFC
 
 Android's NFC is the host's controller. When the host has `/dev/nfc-nci` (a

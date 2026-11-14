@@ -1,0 +1,11 @@
+# Hardware video decoding: Codec2 components on the host's V4L2 stateful
+# decoders, which the supervisor gives the cell as /dev/video2 (mediacodec).
+service vendor.media.c2-droidloom-v4l2 /vendor/bin/hw/android.hardware.media.c2-service.droidloom-v4l2
+    class hal
+    user mediacodec
+    # Not camera: the store opens every /dev/video* it may, and opening a
+    # camera node would start the host's camera
+    group mediadrm drmrpc
+    ioprio rt 4
+    task_profiles ProcessCapacityHigh
+    interface aidl android.hardware.media.c2.IComponentStore/default

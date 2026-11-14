@@ -1,0 +1,25 @@
+diff --git a/components/DecodeInterface.cpp b/components/DecodeInterface.cpp
+index 53689bd..3cc4fd9 100644
+--- a/components/DecodeInterface.cpp
++++ b/components/DecodeInterface.cpp
+@@ -38,7 +38,10 @@ size_t calculateInputBufferSize(size_t area) {
+ 
+     // Enlarge the input buffer for 4k video
+     if (area > k1080pArea) return kInputBufferSizeFor4K;
+-    return kInputBufferSizeFor1080p;
++    // Qualcomm's iris (and its vendor driver) sizes every bitstream buffer
++    // for 4K (7 MiB) whatever the stream, and V4L2 refuses a smaller buffer:
++    // smaller streams get the 4K size too.
++    return kInputBufferSizeFor4K;
+ }
+ }  // namespace
+ 
+@@ -305,7 +308,7 @@ DecodeInterface::DecodeInterface(const std::string& name,
+ 
+     addParameter(
+             DefineParam(mMaxInputSize, C2_PARAMKEY_INPUT_MAX_BUFFER_SIZE)
+-                    .withDefault(new C2StreamMaxBufferSizeInfo::input(0u, kInputBufferSizeFor1080p))
++                    .withDefault(new C2StreamMaxBufferSizeInfo::input(0u, kInputBufferSizeFor4K))
+                     .withFields({
+                             C2F(mMaxInputSize, value).any(),
+                     })

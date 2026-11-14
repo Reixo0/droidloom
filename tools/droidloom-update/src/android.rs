@@ -152,6 +152,22 @@ const PATCHES: &[(&str, &str)] = &[
         "android/aosp-patches/0022-sensors-rust-backend.patch",
     ),
     (
+        "external/v4l2_codec2",
+        "android/aosp-patches/0023-v4l2-codec2-unknown-input-size.patch",
+    ),
+    (
+        "external/v4l2_codec2",
+        "android/aosp-patches/0024-v4l2-codec2-4k-input-buffers.patch",
+    ),
+    (
+        "external/v4l2_codec2",
+        "android/aosp-patches/0025-v4l2-codec2-free-capture-before-format.patch",
+    ),
+    (
+        "external/v4l2_codec2",
+        "android/aosp-patches/0026-v4l2-codec2-igba-surface-buffers.patch",
+    ),
+    (
         "frameworks/av",
         "android/audio/0001-host-buffered-playback.patch",
     ),
@@ -814,6 +830,7 @@ pub fn build_targets(
         "android/power",
         "android/location",
         "android/sensors",
+        "android/media",
         "android/nfc",
         "android/camera",
         "android/lmkd-compat",
