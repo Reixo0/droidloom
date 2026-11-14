@@ -658,9 +658,12 @@ pub const CROSS_TARGET: &str = "aarch64-unknown-linux-gnu";
 /// persistent cache below `work`, so later builds compile only what changed.
 pub fn host_build(repo: &Path, work: &Path, sysroot: &Path, jobs: usize) -> Result<PathBuf> {
     let sysroot = sysroot.canonicalize()?;
-    let lib = sysroot.join("usr/lib");
-    if !lib.join("pkgconfig").is_dir() {
-        return fail("the ARM64 sysroot has no usr/lib/pkgconfig");
+    // Arch Linux ARM keeps libraries in usr/lib, Fedora in usr/lib64
+    if !["usr/lib/pkgconfig", "usr/lib64/pkgconfig"]
+        .iter()
+        .any(|dir| sysroot.join(dir).is_dir())
+    {
+        return fail("the ARM64 sysroot has no usr/lib/pkgconfig or usr/lib64/pkgconfig");
     }
     let root = sysroot
         .to_str()
@@ -691,7 +694,8 @@ pub fn host_build(repo: &Path, work: &Path, sysroot: &Path, jobs: usize) -> Resu
         .env(
             "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS",
             format!(
-                "-C link-arg=--sysroot={root} -C link-arg=-L{root}/usr/lib -C link-arg=-Wl,-rpath-link,{root}/usr/lib"
+                "-C link-arg=--sysroot={root} -C link-arg=-L{root}/usr/lib64 -C link-arg=-L{root}/usr/lib \
+                 -C link-arg=-Wl,-rpath-link,{root}/usr/lib64 -C link-arg=-Wl,-rpath-link,{root}/usr/lib"
             ),
         )
         .env("CC_aarch64_unknown_linux_gnu", "aarch64-linux-gnu-gcc")
@@ -700,7 +704,7 @@ pub fn host_build(repo: &Path, work: &Path, sysroot: &Path, jobs: usize) -> Resu
         .env("PKG_CONFIG_SYSROOT_DIR_aarch64_unknown_linux_gnu", root)
         .env(
             "PKG_CONFIG_LIBDIR_aarch64_unknown_linux_gnu",
-            format!("{root}/usr/lib/pkgconfig:{root}/usr/share/pkgconfig"),
+            format!("{root}/usr/lib64/pkgconfig:{root}/usr/lib/pkgconfig:{root}/usr/share/pkgconfig"),
         )
         .args(["build", "--locked", "--release", "--target", CROSS_TARGET])
         .arg(format!("-j{jobs}"));
