@@ -39,6 +39,23 @@ struct Args {
 }
 #[derive(Subcommand)]
 enum Action {
+    /// Seal already cross-built outputs for a phone installed by hand (not
+    /// from the packages), without activation. NX809J fork.
+    BundleStage {
+        #[arg(long)]
+        work: PathBuf,
+        #[arg(long)]
+        host: PathBuf,
+        #[arg(long)]
+        base: PathBuf,
+        #[arg(long, value_parser = ["droidloom_arm64"])]
+        product: String,
+        /// Tracked profile in packaging/devices; supplies the cell and user.
+        #[arg(long)]
+        device: String,
+        #[arg(long)]
+        destination: PathBuf,
+    },
     /// Assemble a phone test package payload from finished Android and ARM64
     /// host builds; droidloom-package candidate packs it.
     CandidateStage {
@@ -186,6 +203,29 @@ fn repository(explicit: Option<PathBuf>) -> Result<PathBuf> {
 }
 fn execute(args: Args) -> Result<()> {
     match &args.command {
+        Some(Action::BundleStage {
+            work,
+            host,
+            base,
+            product,
+            device,
+            destination,
+        }) => {
+            let repo = repository(args.source.clone())?;
+            let (cell, user) = assemble::device_cell(&repo, product, device)?;
+            return assemble::stage_cross(
+                &repo,
+                work,
+                host,
+                base,
+                assemble::CrossTarget {
+                    product,
+                    cell: &cell,
+                    user: &user,
+                },
+                destination,
+            );
+        }
         Some(Action::CandidateStage {
             work,
             host,

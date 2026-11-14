@@ -653,6 +653,12 @@ fn configure_target(repo: &Path, payload: &Path, spec: &Value, user: &str, forwa
     Ok(())
 }
 
+pub struct CrossTarget<'a> {
+    pub product: &'a str,
+    pub cell: &'a Value,
+    pub user: &'a str,
+}
+
 /// Linux target of the ARM64 device programs.
 pub const CROSS_TARGET: &str = "aarch64-unknown-linux-gnu";
 
@@ -722,6 +728,119 @@ pub fn host_build(repo: &Path, work: &Path, sysroot: &Path, jobs: usize) -> Resu
     }
     println!("ARM64 host programs: {}", release.display());
     Ok(release)
+}
+
+// NX809J fork: the hand-installed bundle path for a phone that does not run
+// the Arch packages (Fedora). Upstream removed it in 310a67c.
+
+/// Fields a device profile may set. Runtime mappings belong to the recipe.
+const DEVICE_FIELDS: &[&str] = &[
+    "host_uid",
+    "subordinate_uids",
+    "subordinate_gids",
+    "data_dir",
+    "runtime_dir",
+    "denial_socket",
+    "render_node",
+    "graphics_backend",
+    "gapps_dir",
+    "shared_storage_directories",
+];
+
+/// Combine the product's tracked cell recipe with a device profile from
+/// `packaging/devices`, returning the cell and the device's desktop user.
+pub fn device_cell(repo: &Path, product: &str, device: &str) -> Result<(Value, String)> {
+    if device.is_empty()
+        || !device
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-')
+    {
+        return fail("device names contain only letters, digits and hyphens");
+    }
+    let profile = json(
+        &repo
+            .join("packaging/devices")
+            .join(format!("{device}.json")),
+    )?;
+    if profile["product"].as_str() != Some(product) {
+        return fail(format!("device {device} is not a {product} device"));
+    }
+    let recipe = match product {
+        "droidloom_arm64" => "packaging/cell-spec-arm64.json",
+        _ => return fail("device profiles exist only for droidloom_arm64"),
+    };
+    let mut cell = json(&repo.join(recipe))?;
+    merge_device(&mut cell, &profile["cell"])?;
+    let user = profile["user"]
+        .as_str()
+        .ok_or("device profile has no desktop user")?;
+    Ok((cell, user.to_owned()))
+}
+
+fn merge_device(cell: &mut Value, device: &Value) -> Result<()> {
+    for (field, value) in device.as_object().ok_or("device profile has no cell")? {
+        if !DEVICE_FIELDS.contains(&field.as_str()) {
+            return fail(format!("device profiles cannot set {field}"));
+        }
+        cell[field] = value.clone();
+    }
+    Ok(())
+}
+
+pub fn stage_cross(
+    repo: &Path,
+    work: &Path,
+    host: &Path,
+    base: &Path,
+    target: CrossTarget<'_>,
+    destination: &Path,
+) -> Result<()> {
+    let CrossTarget {
+        product,
+        cell,
+        user,
+    } = target;
+    let _lock = Lock::acquire(&work.join("package-build.lock"))?;
+    let _source_lock = Lock::acquire(&work.join("aosp-source-update.lock"))?;
+    // One stage per device: a previous bundle there is replaced once the new one verifies.
+    if destination.exists() && !destination.join("droidloom-update.json").is_file() {
+        return fail("bundle destination exists and is not a bundle");
+    }
+    check_base(repo, base, product)?;
+    let parent = destination
+        .parent()
+        .ok_or("bundle destination has no parent")?;
+    fs::create_dir_all(parent)?;
+    let staging = tempfile::Builder::new()
+        .prefix("cross-bundle-")
+        .tempdir_in(parent)?;
+    assemble_artifacts(
+        repo,
+        work,
+        base,
+        &work.join("android-out/target/product").join(product),
+        host,
+        staging.path(),
+    )?;
+    configure_target(repo, staging.path(), cell, user, None)?;
+    let notices = staging.path().join("usr/share/licenses/droidloom");
+    crate::licenses::project(repo, &notices)?;
+    crate::licenses::rust(repo, &notices.join("rust"))?;
+    let id = crate::bundle::seal(staging.path(), crate::bundle::source_identity(repo)?)?;
+    crate::bundle::verify(staging.path())?;
+    let previous = tempfile::Builder::new()
+        .prefix("previous-bundle-")
+        .tempdir_in(parent)?;
+    if destination.exists() {
+        fs::rename(destination, previous.path().join("bundle"))?;
+    }
+    fs::rename(staging.path(), destination)?;
+    drop(previous);
+    println!(
+        "Verified cross-built bundle {id}: {}",
+        destination.display()
+    );
+    Ok(())
 }
 
 /// The base partitions are the ones the product's source lock pins.
