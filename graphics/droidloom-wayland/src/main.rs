@@ -1633,6 +1633,9 @@ impl App {
         }
         task.window.take();
         task.unmap_requested = false;
+        // A suspend hand-over pending on this window ends with it: Android is
+        // removing the task, and reporting its visibility later is an error.
+        task.hide_due = None;
         self.task_work
             .mark(object, readiness::CONFIG | readiness::CLEANUP);
 
@@ -2139,6 +2142,9 @@ impl App {
                 continue;
             }
             task.hide_due = None;
+            if task.closing || task.window.is_none() {
+                continue;
+            }
             eprintln!(
                 "Droidloom task {}: no composed frame {} ms after suspend; stopping it with \
                  Android's buffers on the window",
