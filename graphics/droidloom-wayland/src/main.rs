@@ -5,6 +5,7 @@
 mod activation;
 mod clipboard;
 mod clock;
+mod density;
 mod fence_wakeup;
 mod frame_timeline;
 mod imports;
@@ -77,8 +78,7 @@ use wayland_protocols::wp::fractional_scale::v1::client::{
     wp_fractional_scale_v1::{self, WpFractionalScaleV1},
 };
 use wayland_protocols::wp::idle_inhibit::zv1::client::{
-    zwp_idle_inhibit_manager_v1::ZwpIdleInhibitManagerV1,
-    zwp_idle_inhibitor_v1::ZwpIdleInhibitorV1,
+    zwp_idle_inhibit_manager_v1::ZwpIdleInhibitManagerV1, zwp_idle_inhibitor_v1::ZwpIdleInhibitorV1,
 };
 use wayland_protocols::wp::linux_dmabuf::zv1::client::{
     zwp_linux_buffer_params_v1, zwp_linux_dmabuf_feedback_v1,
@@ -102,6 +102,9 @@ use wayland_protocols_wlr::output_power_management::v1::client::{
 const BOOTSTRAP_PACKAGE: &str = "android.droidloom.bootstrap";
 const TARGET_POOL_LENGTH: usize = 3;
 const RELEASE_POLL_FALLBACK: Duration = Duration::from_millis(4);
+/// The longest a suspended task keeps running while SurfaceFlinger composes
+/// the frame that takes its buffers off the window.
+const HIDE_GRACE: Duration = Duration::from_millis(250);
 const LEFT_BUTTON: u32 = 0x110;
 const FRACTIONAL_SCALE_DENOMINATOR: u32 = 120;
 const MAX_BUFFER_DIMENSION: u32 = 16_384;
@@ -241,6 +244,8 @@ struct TaskWindow {
     refresh_millihz: u32,
     entered_outputs: Vec<wl_output::WlOutput>,
     presentation_output: Option<wl_output::WlOutput>,
+    /// The density last sent for the task; None before the first.
+    density_dpi: Option<u32>,
     targets: BTreeMap<BufferId, RenderTarget>,
     pending: VecDeque<PendingFrame>,
     presentation_feedback: Vec<FrameFeedback>,
@@ -249,9 +254,16 @@ struct TaskWindow {
     content_opaque: bool,
     applied_opaque: Option<bool>,
     composed_root: bool,
+    /// The task shows the one it opened over through its gaps, as a dialog
+    /// does: its layers go over a clear root instead of the backing.
+    see_through: bool,
     focused: bool,
     /// Denial minimized the window (xdg `suspended`): Android stops the task.
     suspended: bool,
+    /// A minimized window may keep the buffers it shows until it is restored.
+    /// Android stops a task only once its own buffers are off the window, or
+    /// at this deadline: a stopping app waits for the buffers it drew.
+    hide_due: Option<Instant>,
     /// Held while a shown Android window has `FLAG_KEEP_SCREEN_ON`. Denial
     /// keeps its displays on only while this window is visible.
     idle_inhibitor: Option<ZwpIdleInhibitorV1>,
@@ -269,7 +281,7 @@ impl TaskWindow {
     }
 
     fn visibility(&self) -> Visibility {
-        if self.suspended {
+        if self.suspended && self.hide_due.is_none() {
             Visibility::Hidden
         } else {
             Visibility::Visible
@@ -345,6 +357,11 @@ struct App {
     gbm: GbmDevice<File>,
     listener: DenialEndpointListener,
     window_policy: WindowPolicyStore,
+    /// The density each task gets on the output it is on.
+    densities: density::Densities,
+    /// The task last given a density, and the density last sent for new tasks.
+    density_task: Option<TaskObjectId>,
+    new_task_density: Option<u32>,
     endpoint: Option<DenialEndpoint>,
     tasks: BTreeMap<TaskObjectId, TaskWindow>,
     task_work: readiness::Tasks,
@@ -512,7 +529,90 @@ impl App {
         })
     }
 
+    /// Gives the task the density of the output it is on, when that
+    /// changed: before its configure, so Android lays it out once.
+    fn update_task_density(&mut self, object: TaskObjectId) -> Result<(), PresenterError> {
+        let Some(task) = self.tasks.get(&object) else {
+            return Ok(());
+        };
+        if task.headless() {
+            return self.update_new_task_density(object);
+        }
+        if task.configure_serial == 0 {
+            return Ok(());
+        }
+        let name = select_surface_output(
+            &task.entered_outputs,
+            task.presentation_output.as_ref(),
+            |output| self.output_state.info(output).map(|_| 0),
+        )
+        .and_then(|output| self.output_state.info(output))
+        .and_then(|info| info.name);
+        let dpi = self.densities.dpi(name.as_deref(), task.applied_scale_120);
+        if task.density_dpi != Some(dpi) {
+            self.endpoint
+                .as_ref()
+                .ok_or(PresenterError::Configuration("endpoint disappeared"))?
+                .send_density(object, dpi)?;
+            if let Some(task) = self.tasks.get_mut(&object) {
+                task.density_dpi = Some(dpi);
+            }
+            self.density_task = Some(object);
+        }
+        let bootstrap = self
+            .tasks
+            .iter()
+            .find_map(|(object, task)| task.headless().then_some(*object));
+        bootstrap.map_or(Ok(()), |bootstrap| self.update_new_task_density(bootstrap))
+    }
+
+    /// Tells Android, on the bootstrap display's object, the density to
+    /// create tasks at, so an activity starts laid out for its window instead
+    /// of being relaunched when the window's density arrives. A new window
+    /// most likely opens where the last one got its density; with no window
+    /// open it is the density of the largest output.
+    fn update_new_task_density(&mut self, bootstrap: TaskObjectId) -> Result<(), PresenterError> {
+        let last = self
+            .density_task
+            .and_then(|object| self.tasks.get(&object))
+            .and_then(|task| task.density_dpi);
+        let Some(dpi) = last.or_else(|| self.largest_output_density()) else {
+            return Ok(());
+        };
+        if self.new_task_density == Some(dpi) {
+            return Ok(());
+        }
+        self.endpoint
+            .as_ref()
+            .ok_or(PresenterError::Configuration("endpoint disappeared"))?
+            .send_density(bootstrap, dpi)?;
+        self.new_task_density = Some(dpi);
+        Ok(())
+    }
+
+    fn largest_output_density(&self) -> Option<u32> {
+        self.output_state
+            .outputs()
+            .filter_map(|output| self.output_state.info(&output))
+            .filter_map(|info| {
+                let mode = info
+                    .modes
+                    .iter()
+                    .find(|mode| mode.current)
+                    .or_else(|| info.modes.iter().find(|mode| mode.preferred))?;
+                let size = oriented_output_size(mode.dimensions, info.transform)?;
+                let logical = info.logical_size.and_then(|(width, height)| {
+                    Some((u32::try_from(width).ok()?, u32::try_from(height).ok()?))
+                });
+                let scale_120 = output_scale_120(size, logical, info.scale_factor);
+                Some((size, self.densities.dpi(info.name.as_deref(), scale_120)))
+            })
+            .max_by_key(|((width, height), _)| u64::from(*width) * u64::from(*height))
+            .map(|(_, dpi)| dpi)
+    }
+
     fn update_task_refresh(&mut self, object: TaskObjectId) -> Result<(), PresenterError> {
+        self.update_task_density(object)?;
         let refresh = self.task_refresh_millihz(object);
         let task = self
             .tasks
@@ -666,6 +766,10 @@ impl App {
         package: &str,
     ) -> Result<(), PresenterError> {
         let headless = package == BOOTSTRAP_PACKAGE;
+        if headless {
+            // A new Android: it has not been told a density for new tasks.
+            self.new_task_density = None;
+        }
         if !headless && let Err(error) = self.window_policy.reload_policy() {
             eprintln!("Droidloom kept the last valid window policy: {error}");
         }
@@ -723,6 +827,7 @@ impl App {
                 refresh_millihz: 60_000,
                 entered_outputs: Vec::new(),
                 presentation_output: None,
+                density_dpi: None,
                 targets: BTreeMap::new(),
                 pending: VecDeque::new(),
                 presentation_feedback: Vec::new(),
@@ -730,10 +835,12 @@ impl App {
                 content_opaque: false,
                 applied_opaque: None,
                 composed_root: false,
+                see_through: false,
                 presentation_audit: droidloom_timing::traced(droidloom_timing::Diagnostic::Audit)
                     .then(presentation_audit::Audit::default),
                 focused: false,
                 suspended: false,
+                hide_due: None,
                 idle_inhibitor: None,
                 unmap_requested: false,
                 closing: false,
@@ -847,6 +954,7 @@ impl App {
                 viewport.set_destination(destination_width, destination_height);
             }
         }
+        self.update_task_density(object)?;
         self.endpoint
             .as_mut()
             .ok_or(PresenterError::Configuration("endpoint disappeared"))?
@@ -1287,6 +1395,7 @@ impl App {
         };
         surface.attach(target.wayland.as_ref(), 0, 0);
         task.composed_root = true;
+        let hide = task.suspended && task.hide_due.take().is_some();
         if layers_hidden {
             // Android damage compares app frames, not our constant root backing.
             // Replacing that root with a composed target changes the whole image.
@@ -1330,8 +1439,15 @@ impl App {
                 submitted_nanos,
             });
         }
+        let focused = task.focused;
         self.task_work.frames.insert(object);
         self.task_work.mark(object, readiness::FRAMES);
+        if hide {
+            self.endpoint
+                .as_ref()
+                .ok_or(PresenterError::Configuration("endpoint disappeared"))?
+                .send_visibility(object, Visibility::Hidden, focused)?;
+        }
         Ok(())
     }
 
@@ -1629,7 +1745,27 @@ impl App {
                     && let (Some(manager), Some(window)) =
                         (self.idle_inhibit_manager.as_ref(), task.window.as_ref())
                 {
-                    task.idle_inhibitor = Some(manager.create_inhibitor(window.wl_surface(), qh, ()));
+                    task.idle_inhibitor =
+                        Some(manager.create_inhibitor(window.wl_surface(), qh, ()));
+                }
+            }
+            EndpointAction::SetParent { object, parent } => {
+                // The task leaves `parent` running, as a dialog does: as its
+                // xdg parent, the host keeps that window going while this one
+                // is in front. A closing parent's toplevel is gone already.
+                let see_through = parent.is_some();
+                let parent = parent
+                    .and_then(|parent| self.tasks.get(&parent))
+                    .filter(|parent| !parent.closing)
+                    .and_then(|parent| parent.window.as_ref())
+                    .map(|window| window.xdg_toplevel().clone());
+                let task = self
+                    .tasks
+                    .get_mut(&object)
+                    .ok_or(PresenterError::UnknownTask(object))?;
+                task.see_through = see_through;
+                if let Some(window) = task.window.as_ref().filter(|_| !task.closing) {
+                    window.xdg_toplevel().set_parent(parent.as_ref());
                 }
             }
             EndpointAction::RequestActivation { object } => {
@@ -1718,7 +1854,9 @@ impl App {
                 let endpoint = endpoint
                     .with_direct_input()
                     .with_lazy_render_targets()
-                    .with_scene_presentation();
+                    .with_scene_presentation()
+                    .with_task_density()
+                    .with_task_parents();
                 let endpoint = if self.idle_inhibit_manager.is_some() {
                     endpoint.with_keep_screen_on()
                 } else {
@@ -1989,6 +2127,31 @@ impl App {
         self.update_text_input();
     }
 
+    fn hide_deadline(&self) -> Option<Instant> {
+        self.tasks.values().filter_map(|task| task.hide_due).min()
+    }
+
+    /// Stop suspended tasks whose composed frame did not arrive in time. Their
+    /// window keeps Android's buffers, as before this hand-over existed.
+    fn hide_overdue(&mut self, now: Instant) -> Result<(), PresenterError> {
+        for (object, task) in &mut self.tasks {
+            if task.hide_due.is_none_or(|due| now < due) {
+                continue;
+            }
+            task.hide_due = None;
+            eprintln!(
+                "Droidloom task {}: no composed frame {} ms after suspend; stopping it with \
+                 Android's buffers on the window",
+                object.0,
+                HIDE_GRACE.as_millis()
+            );
+            if let Some(endpoint) = self.endpoint.as_ref() {
+                endpoint.send_visibility(*object, task.visibility(), task.focused)?;
+            }
+        }
+        Ok(())
+    }
+
     fn set_focus(&mut self, object: Option<TaskObjectId>) -> Result<(), PresenterError> {
         if self.focused == object {
             return Ok(());
@@ -2176,9 +2339,16 @@ impl WindowHandler for App {
         }
         let suspended = configure.state.contains(WindowState::SUSPENDED);
         if task.suspended != suspended {
+            let before = task.visibility();
             task.suspended = suspended;
+            // Suspended windows take no layers: SurfaceFlinger composes the
+            // next frame into our own target, which replaces Android's buffers.
+            task.hide_due = (suspended && task.layers.as_ref().is_some_and(|l| l.shows_android()))
+                .then(|| Instant::now() + HIDE_GRACE);
+            self.task_work.mark(object, readiness::CONFIG);
             let (visibility, focused) = (task.visibility(), task.focused);
-            if let Some(endpoint) = self.endpoint.as_ref()
+            if visibility != before
+                && let Some(endpoint) = self.endpoint.as_ref()
                 && let Err(error) = endpoint.send_visibility(object, visibility, focused)
             {
                 self.fail(&error);
@@ -3229,6 +3399,9 @@ fn run() -> Result<(), PresenterError> {
         gbm,
         listener,
         window_policy,
+        densities: density::Densities::load(env::var_os("XDG_CONFIG_HOME"), env::var_os("HOME")),
+        density_task: None,
+        new_task_density: None,
         endpoint: None,
         tasks: BTreeMap::new(),
         task_work: readiness::Tasks::default(),
@@ -3343,8 +3516,10 @@ fn poll_sources(
     };
     let now = Instant::now();
     app.report_stalled_scenes(now);
+    app.hide_overdue(now)?;
     let fallback_deadline = app.task_work.deadline(now, RELEASE_POLL_FALLBACK);
     let stall_deadline = app.stalled_scene_deadline();
+    let hide_deadline = app.hide_deadline();
     // Pending Wayland events must be dispatched before sleeping. The previous
     // fixed timeout masked a missed wakeup here when the socket was drained
     // by another reader but our event queue still contained callbacks.
@@ -3368,6 +3543,13 @@ fn poll_sources(
     if let Some(endpoint) = app.endpoint.as_ref() {
         descriptors.push(libc::pollfd {
             fd: endpoint.socket().socket().as_fd().as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        });
+    }
+    if let Some(fd) = app.densities.fd() {
+        descriptors.push(libc::pollfd {
+            fd,
             events: libc::POLLIN,
             revents: 0,
         });
@@ -3437,6 +3619,7 @@ fn poll_sources(
         .into_iter()
         .chain(fallback_deadline)
         .chain(stall_deadline)
+        .chain(hide_deadline)
         .min();
     let timeout = if app.task_work.pending() {
         0 // Flush Wayland first, then service work queued during this turn.
@@ -3459,6 +3642,17 @@ fn poll_sources(
         }
     }
     app.clipboard.notify_ready(descriptors);
+    let densities = app.densities.fd();
+    if descriptors
+        .iter()
+        .any(|event| Some(event.fd) == densities && event.revents & libc::POLLIN != 0)
+        && app.densities.changed()
+    {
+        let objects: Vec<TaskObjectId> = app.tasks.keys().copied().collect();
+        for object in objects {
+            app.update_task_density(object)?;
+        }
+    }
     app.direct_input.notify_ready(descriptors);
     if app
         .endpoint
@@ -3602,6 +3796,19 @@ fn scale_dimension(logical: u32, scale_120: u32) -> Result<u32, PresenterError> 
         ));
     }
     Ok(scaled)
+}
+
+/// An output's scale in 120ths: its pixels over its logical size along the
+/// longer side, which no window is needed to learn; the whole-number scale
+/// when the compositor gives no logical size.
+fn output_scale_120(size: (u32, u32), logical: Option<(u32, u32)>, scale_factor: i32) -> u32 {
+    let pixels = u64::from(size.0.max(size.1));
+    match logical.map(|(width, height)| u64::from(width.max(height))) {
+        Some(logical) if logical != 0 => {
+            u32::try_from((pixels * 120 + logical / 2) / logical).unwrap_or(u32::MAX)
+        }
+        _ => u32::try_from(scale_factor.max(1)).unwrap_or(1) * FRACTIONAL_SCALE_DENOMINATOR,
+    }
 }
 
 fn oriented_output_size(
@@ -3770,6 +3977,14 @@ mod output_power_test;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_output_scale_comes_from_its_logical_size() {
+        assert_eq!(output_scale_120((1216, 2688), Some((608, 1344)), 2), 240);
+        assert_eq!(output_scale_120((2688, 1216), Some((1792, 811)), 2), 180);
+        assert_eq!(output_scale_120((3840, 2160), None, 2), 240);
+        assert_eq!(output_scale_120((1920, 1080), Some((0, 0)), 0), 120);
+    }
 
     #[test]
     fn contact_retirement_clears_shared_task_routes_pointer_and_deferred_touches() {

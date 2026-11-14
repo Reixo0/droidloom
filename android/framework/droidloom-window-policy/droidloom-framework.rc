@@ -7,6 +7,7 @@ on early-init
 on post-fs-data
     mkdir /dev/socket/droidloom-framework 0700 system system
     setprop sys.droidloom.framework_ready 0
+    setprop sys.droidloom.credential locked
     # PackageManager applies these to all installers, including app stores,
     # sideloads, updates and bulk restores. No profile is required for speed.
     setprop pm.dexopt.install speed
@@ -19,11 +20,34 @@ on post-fs-data
     # profile-only compilation. Inactive-app storage reclamation is unchanged.
     setprop pm.dexopt.bg-dexopt speed
 
+# Some apps check the chip or GPU driver by name, as a game's Qualcomm frame
+# generation does. A phone keeps its stock names in these persistent
+# properties; init copies them at every start, before zygote. ro.soc.model
+# takes one value per start.
+on property:persist.vendor.droidloom.soc_model=*
+    setprop ro.soc.model ${persist.vendor.droidloom.soc_model}
+
+on property:persist.vendor.droidloom.angle.gl_renderer=*
+    setprop debug.angle.gl_renderer ${persist.vendor.droidloom.angle.gl_renderer}
+
+on property:persist.vendor.droidloom.angle.gl_version=*
+    setprop debug.angle.gl_version ${persist.vendor.droidloom.angle.gl_version}
+
+# Android gives ANGLE to apps of the game category while this switch is 1.
+# The image sets its default; a choice made in Settings stays across starts.
+on property:persist.vendor.droidloom.games_gl_driver=angle
+    setprop debug.graphics.angle.force_enable_angle_for_games 1
+
+on property:persist.vendor.droidloom.games_gl_driver=mesa
+    setprop debug.graphics.angle.force_enable_angle_for_games 0
+
 on property:init.svc.zygote=stopped
     setprop sys.droidloom.framework_ready 0
+    setprop sys.droidloom.credential locked
 
 on property:init.svc.zygote=restarting
     setprop sys.droidloom.framework_ready 0
+    setprop sys.droidloom.credential locked
 
 service droidloom-ime-setup /system/bin/sh /droidloom/ime/setup
     class late_start

@@ -51,7 +51,12 @@ The `forwarding` pairing:
 - sets `ro.hardware.vulkan=droidloom` and `ro.hardware.egl=angle` in the
   product properties, which Android loads after the vendor image's;
 - binds `%t/droidloom/gpu.sock` at `/dev/socket/droidloom/gpu`;
-- allocates buffers from the system DMA heap, so both GPUs can import them.
+- allocates buffers from the system DMA heap, so both GPUs can import them;
+- sets `vendor.minigbm.vram=vulkan` for Android: RGB buffers that are only
+  drawn, sampled and shown come from the Vulkan driver instead, in VRAM, in
+  one of the modifiers the server lists. Window buffers are such buffers.
+  With a compositor on another GPU the server lists none, and every buffer
+  stays in the DMA heap.
 
 `droidloom-gpu.socket` belongs to `droidloom.service`. The first Android
 Vulkan client starts `droidloom-gpu.service`, which forks a server for each
@@ -86,9 +91,28 @@ Client and server share one memory region and one Unix socket.
   to the server at once, so the host replays while the application records.
 - The socket carries only the handshake and file descriptors: DMA-BUFs,
   sync files and syncobjs pass as descriptors, never as copies.
-- Host-visible memory is a memfd the server imports with
-  `VK_EXT_external_memory_host`; the client maps the same pages, so mapping
-  needs no call.
+- Host-visible memory is shared: the client maps the very pages the GPU
+  works on, so mapping needs no call. System memory is a memfd the server
+  imports with `VK_EXT_external_memory_host`. Mappable VRAM, which the
+  driver offers on a card with resizable BAR, stays the driver's own
+  allocation and reaches the client as a DMA-BUF. The GPU works on a VRAM
+  buffer without crossing the PCIe link; the CPU reads system memory far
+  faster. Applications choose between the two as they do on the driver
+  itself.
+
+When the listener starts, a probe exports a page of each mappable VRAM type,
+writes through the DMA-BUF's mapping and reads back through the driver's
+own. Types that pass are offered as mappable; the start-up line in
+`journalctl --user -u droidloom-gpu` lists them beside the system-memory
+types. `droidloom-gpu-triangle --headless --check-memory` checks every
+mappable type both ways through the forwarding.
+
+`droidloom-gpu-triangle --headless --check-target` renders into an exported
+buffer, imports its DMA-BUF a second time the way a compositor does, and
+compares the two after each of two frames. With `--vram` the buffer lies in
+VRAM in one of the GPU's own DRM modifiers instead of LINEAR system memory;
+with a window, `--vram` shows such buffers in a compositor that renders on
+the same GPU, which then reads them where they are.
 
 `graphics/droidloom-gpu-protocol/api.txt` lists every forwarded command and
 structure. `droidloom-gpu-gen` turns it and `vk.xml` into the encoders, the
@@ -109,7 +133,21 @@ expects.
   in VRAM, and the buffer is a second image beside it (`shadow.rs`). A window
   buffer gets the frame at `vkQueueSignalReleaseImageANDROID`. An
   AHardwareBuffer gets it when the application releases the image to the
-  foreign queue, and gives it back on acquire.
+  foreign queue, and gives it back on acquire. A buffer whose handle names
+  one of the GPU's own modifiers lies in VRAM: it is the application's image
+  itself, with no second image and no copy.
+- **The GPU's modifiers.** `VkDrmFormatModifierPropertiesListEXT` answers
+  with the host driver's list, so a client can allocate a buffer in VRAM
+  with plain Vulkan: an image created from that list, device-local memory
+  exported as a DMA-BUF, and the modifier the driver chose read back. The
+  DMA-BUF keeps the memory after the client frees its allocation. Android's
+  allocator does exactly this (`0021-minigbm-vram-images.patch`), in its own
+  process, for buffers nobody maps. Any such buffer may end up in a window, so the list holds only what the compositor
+  imports (`layouts.rs`): the server asks it once, at start. A compositor
+  that renders on the same GPU takes the GPU's modifiers, and window buffers
+  lie in VRAM. A compositor on another GPU takes none of them, the list is
+  LINEAR alone, and buffers stay in system memory. The start-up line says
+  which. `--all-layouts` skips the question, for tests without a window.
 - **Video buffers.** Decoders fill YUV AHardwareBuffers: NV12, YV12 and
   P010. The driver reports them as external formats, which ANGLE samples
   through a YCbCr conversion; a named format would also have to be

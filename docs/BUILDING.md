@@ -785,9 +785,11 @@ cargo run --locked -j 1 -p droidloom-gapps -- package \
   --output dist/droidloom-gapps-4.9.20260513-1-aarch64.pkg.tar.zst
 ```
 
-For pacman-managed deployments, replace `--standalone` with
-`--base-package-version <version-release>` to require the exact matching
-`droidloom-runtime` and `droidloom-image` packages and include the lifecycle hook.
+For pacman-managed deployments, leave out `--standalone`: the package then
+depends on `droidloom-runtime` and `droidloom-image`, of any release, and
+includes the lifecycle hook. It is bound to the pinned Android base images,
+which the supervisor checks by hash at each start, so it needs packing again
+only when that base moves.
 Standalone packages require manually stopping Droidloom before every install,
 upgrade or removal. They contain images and notices, not an updated supervisor.
 
@@ -795,7 +797,10 @@ The runtime must include `gapps_dir` support before activation. Install the
 package with pacman only when ready; administrator access is needed to write
 the package-owned directory and update the package database. While Droidloom is
 stopped, add `"gapps_dir": "/usr/lib/droidloom/addons/gapps"` to its root-owned
-cell specification. Package installation alone does not activate Google apps.
+cell specification. Package installation alone does not activate Google apps
+on an installation that is already set up. The first setup selects an installed
+add-on by itself while Android has never booted on the storage, so installing
+the package before that setup is all a new installation needs.
 The supervisor verifies root ownership and every base/output hash before boot,
 hashing an image again only after it changed since it last matched
 (`/var/cache/droidloom/gapps-verified.json`).

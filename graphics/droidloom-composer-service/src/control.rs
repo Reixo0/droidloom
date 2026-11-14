@@ -27,6 +27,8 @@ type ControlFailure = (ControlErrorCode, String);
 #[derive(Default)]
 struct Commands {
     queue: CommandQueue,
+    /// The last density given for new tasks, for a restarted framework.
+    new_task_density: Option<TaskCommand>,
     generation: u64,
 }
 
@@ -445,6 +447,7 @@ impl TaskCoordinator {
                 incarnation,
                 activate,
                 keep_screen_on,
+                parent,
             } => self.register_direct(
                 request_id,
                 package,
@@ -452,7 +455,10 @@ impl TaskCoordinator {
                 android_display,
                 Some(incarnation),
                 activate,
-                Some(keep_screen_on),
+                Some(FrameworkState {
+                    keep_screen_on,
+                    parent: (parent != 0).then_some(TaskId(parent)),
+                }),
             ),
             ControlRequest::Remove { request_id, object } => {
                 self.remove(request_id, TaskObjectId(object))
@@ -493,12 +499,47 @@ impl TaskCoordinator {
         Ok(())
     }
 
+    /// The density the framework creates tasks at, carried on the bootstrap
+    /// display's object. A newer one replaces it in the queue.
+    pub fn queue_new_task_density(&self, object: TaskObjectId, dpi: u32) -> Result<(), String> {
+        let bootstrap = self
+            .state
+            .0
+            .lock()
+            .map_err(|_| "task-control state lock is poisoned".to_owned())?
+            .bootstrap;
+        // It first comes while the bootstrap display, the first object, is
+        // still being reserved: before its configure, like a task's.
+        if bootstrap.is_some_and(|bootstrap| bootstrap != object) {
+            return Err(format!("object {} is not the bootstrap display", object.0));
+        }
+        let command = TaskCommand {
+            object: object.0,
+            task: 0,
+            incarnation: 0,
+            android_display: 0,
+            action: TaskAction::NewTaskDensity { dpi },
+        };
+        let mut commands = self
+            .commands
+            .0
+            .lock()
+            .map_err(|_| "task command queue lock is poisoned".to_owned())?;
+        commands
+            .queue
+            .push(command, Instant::now())
+            .map_err(|error| error.to_string())?;
+        commands.new_task_density = Some(command);
+        self.commands.1.notify_all();
+        Ok(())
+    }
+
     /// A subscription from a new process is a restarted framework. The tasks
     /// the old one registered died with it, and nothing else retires them:
     /// SurfaceFlinger, which normally reports a destroyed task, may have died
     /// too. The same process subscribing again keeps its tasks.
     fn adopt_framework(&self, pid: u32) -> Result<(), String> {
-        let orphans: Vec<TaskObjectId> = {
+        let (restarted, orphans): (bool, Vec<TaskObjectId>) = {
             let mut state = self
                 .state
                 .0
@@ -506,14 +547,32 @@ impl TaskCoordinator {
                 .map_err(|_| "task-control state lock is poisoned".to_owned())?;
             let bootstrap = state.bootstrap;
             match state.framework.replace(pid) {
-                Some(previous) if previous != pid => state
-                    .registry
-                    .objects()
-                    .filter(|object| Some(*object) != bootstrap)
-                    .collect(),
-                _ => Vec::new(),
+                Some(previous) if previous != pid => (
+                    true,
+                    state
+                        .registry
+                        .objects()
+                        .filter(|object| Some(*object) != bootstrap)
+                        .collect(),
+                ),
+                _ => (false, Vec::new()),
             }
         };
+        if restarted {
+            // The new framework creates tasks at the display's density until told.
+            let mut commands = self
+                .commands
+                .0
+                .lock()
+                .map_err(|_| "task command queue lock is poisoned".to_owned())?;
+            if let Some(command) = commands.new_task_density {
+                commands
+                    .queue
+                    .push(command, Instant::now())
+                    .map_err(|error| error.to_string())?;
+                self.commands.1.notify_all();
+            }
+        }
         if orphans.is_empty() {
             return Ok(());
         }
@@ -647,7 +706,7 @@ impl TaskCoordinator {
         android_display: u32,
         incarnation: Option<u64>,
         activate: bool,
-        keep_screen_on: Option<bool>,
+        framework: Option<FrameworkState>,
     ) -> Result<ControlResponse, ControlFailure> {
         if android_display > i32::MAX as u32 {
             return Err((
@@ -663,9 +722,15 @@ impl TaskCoordinator {
                 object, display: input_display, incarnation: input_incarnation,
             }, &[]).map_err(|error| backend(error.to_string()))?;
         }
-        if let Some(keep) = keep_screen_on {
+        if let Some(framework) = framework {
             self.sink
-                .set_keep_screen_on(display, keep)
+                .set_keep_screen_on(display, framework.keep_screen_on)
+                .map_err(|error| backend(error.to_string()))?;
+            // A parent Droidloom never published, such as Android's home,
+            // is no parent to the host.
+            let parent = framework.parent.and_then(|parent| self.direct_task_object(parent));
+            self.sink
+                .set_parent(display, parent)
                 .map_err(|error| backend(error.to_string()))?;
         }
         if activate {
@@ -875,6 +940,11 @@ impl TaskCoordinator {
     }
 
     /// Resolve the real Android task behind an explicitly authorized direct object.
+    /// The window object of a published Android task.
+    fn direct_task_object(&self, task: TaskId) -> Option<TaskObjectId> {
+        self.state.0.lock().ok()?.direct_tasks.get(&task).copied()
+    }
+
     pub fn direct_task_route_for_object(
         &self,
         object: TaskObjectId,
@@ -1008,6 +1078,13 @@ fn request_id(request: &ControlRequest) -> u64 {
         | ControlRequest::PublishFramework { request_id, .. }
         | ControlRequest::Remove { request_id, .. } => *request_id,
     }
+}
+
+/// What a framework publication says about its task besides its identity.
+struct FrameworkState {
+    keep_screen_on: bool,
+    /// The task it opened over and leaves running.
+    parent: Option<TaskId>,
 }
 
 fn control_error(error: impl std::fmt::Display) -> ControlFailure {

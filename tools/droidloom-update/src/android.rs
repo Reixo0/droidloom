@@ -24,6 +24,10 @@ pub const TARGETS: &[&str] = &[
     "libmeminfo",
     "libinputflinger",
     "libaudiobase",
+    "libEGL",
+    "libEGL_angle",
+    "libGLESv1_CM_angle",
+    "libGLESv2_angle",
     "surfaceflinger",
     "libdroidloom_surface_bridge",
     "libdroidloom_task_control",
@@ -112,6 +116,34 @@ const PATCHES: &[(&str, &str)] = &[
         "android/aosp-patches/0015-libdrm-empty-version-strings.patch",
     ),
     (
+        "external/angle",
+        "android/aosp-patches/0029-angle-save-program-without-waiting.patch",
+    ),
+    (
+        "external/angle",
+        "android/aosp-patches/0030-angle-qcom-motion-estimation.patch",
+    ),
+    (
+        "external/angle",
+        "android/aosp-patches/0031-angle-version-after-blank-lines.patch",
+    ),
+    (
+        "external/angle",
+        "android/aosp-patches/0032-angle-log-validation-errors.patch",
+    ),
+    (
+        "external/angle",
+        "android/aosp-patches/0033-angle-qcom-framebuffer-fetch-noncoherent.patch",
+    ),
+    (
+        "external/angle",
+        "android/aosp-patches/0034-angle-keep-every-color-attachment.patch",
+    ),
+    (
+        "external/angle",
+        "android/aosp-patches/0035-angle-motion-vector-scale.patch",
+    ),
+    (
         "frameworks/native",
         "android/surfaceflinger/0009-droidloom-cpu-placement.patch",
     ),
@@ -141,11 +173,11 @@ const PATCHES: &[(&str, &str)] = &[
     ),
     (
         "hardware/interfaces",
-        "android/aosp-patches/0020-gnss-rust-backend.patch",
+        "android/aosp-patches/0020-keymint-cell-agreement-key.patch",
     ),
     (
         "hardware/interfaces",
-        "android/aosp-patches/0021-camera-external-node-facing.patch",
+        "android/aosp-patches/0020-gnss-rust-backend.patch",
     ),
     (
         "hardware/interfaces",
@@ -190,6 +222,10 @@ const PATCHES: &[(&str, &str)] = &[
     (
         "",
         "android/binder-compat/0003-droidloom-cell-caller-context-fallback.patch",
+    ),
+    (
+        "frameworks/native",
+        "android/binder-compat/0004-droidloom-servicemanager-registrations.patch",
     ),
     (
         "frameworks/native",
@@ -301,6 +337,14 @@ const PATCHES: &[(&str, &str)] = &[
     ),
     (
         "frameworks/native",
+        "android/surfaceflinger/0029-droidloom-host-buffer-stage.patch",
+    ),
+    (
+        "frameworks/native",
+        "android/surfaceflinger/0030-droidloom-see-through-tasks.patch",
+    ),
+    (
+        "frameworks/native",
         "android/inputflinger/0001-application-token-targeted-injection.patch",
     ),
     (
@@ -320,12 +364,20 @@ const PATCHES: &[(&str, &str)] = &[
         "android/inputflinger/0005-droidloom-vulkan-probe.patch",
     ),
     (
+        "frameworks/native",
+        "android/aosp-patches/0023-egl-multifile-cache-value-size.patch",
+    ),
+    (
         "",
         "android/init-compat/0001-droidloom-cell-namespace.patch",
     ),
     (
         "external/minigbm",
         "android/aosp-patches/0007-minigbm-amdgpu-platform.patch",
+    ),
+    (
+        "external/minigbm",
+        "android/aosp-patches/0021-minigbm-vram-images.patch",
     ),
     (
         "system/vold",
@@ -362,6 +414,10 @@ const PATCHES: &[(&str, &str)] = &[
     (
         "frameworks/base",
         "android/framework/0008-droidloom-skip-absent-virtualization.patch",
+    ),
+    (
+        "frameworks/base",
+        "android/framework/0009-droidloom-host-fingerprint-enrollment.patch",
     ),
 ];
 #[derive(Serialize, Deserialize)]
@@ -730,6 +786,22 @@ fn full_targets(product: &str) -> Vec<&'static str> {
         .filter(|name| product != "droidloom_arm64" || *name != "droidloom-native-bridge")
         .collect()
 }
+// Applied in order to the prepared Mesa source in the vendor tree.
+const MESA_PATCHES: &[&str] = &[
+    "0011-mesa-zink-kgsl.patch",
+    "0012-mesa-adreno722.patch",
+    "0013-mesa-texture-upload-span.patch",
+    "0014-mesa-background-cpu-placement.patch",
+    "0016-mesa-turnip-hwui-queues.patch",
+    "0018-mesa-ir3-alias-array-sources.patch",
+    "0019-mesa-turnip-a722-no-bv.patch",
+    "0022-mesa-monotonic-gl-names.patch",
+    "0024-mesa-ir3-cache-source-identity.patch",
+    "0025-mesa-turnip-deferred-swapchain-bind.patch",
+    "0026-mesa-turnip-cache-source-identity.patch",
+    "0027-mesa-turnip-lrz-default-attachment-locations.patch",
+    "0028-mesa-android-app-shader-cache.patch",
+];
 pub fn build_targets(
     repo: &Path,
     source: &Path,
@@ -812,6 +884,12 @@ pub fn build_targets(
         // test fixtures reference test-only HALs omitted from the sparse tree.
         "system/tools/hidl/test",
         "system/tools/hidl/hidl2aidl/test",
+        // The camera provider's VTS needs camera test libraries the sparse
+        // tree omits; only its interface is built.
+        "hardware/interfaces/camera/provider/aidl/vts",
+        // Upstream's software gatekeepers need system/gatekeeper, which the
+        // sparse tree omits; Droidloom's authentication service replaces them.
+        "hardware/interfaces/gatekeeper/aidl/software",
     ] {
         p.put(&source.join(relative).join(".find-ignore"), b"")?;
     }
@@ -826,17 +904,20 @@ pub fn build_targets(
         "runtime/droidloom-cpu-placement",
         "runtime/droidloom-timing",
         "runtime/droidloom-audio-protocol",
+        "runtime/droidloom-device-protocol",
         "runtime/droidloom-location-protocol",
         "runtime/droidloom-sensors-protocol",
         "android/audio",
         "android/framework",
         "android/gpu",
         "android/power",
+        "android/haptics",
+        "android/camera",
+        "android/authentication",
         "android/location",
         "android/sensors",
         "android/media",
         "android/nfc",
-        "android/camera",
         "android/lmkd-compat",
         "android/runtime",
         "android/native-bridge",
@@ -865,40 +946,17 @@ pub fn build_targets(
         .args(["-a", "--delete"])
         .arg(format!("{}/", work.join("mesa-source").display()))
         .arg(&mesa))?;
-    p.patch(
-        source,
-        "vendor/droidloom/mesa3d",
-        &repo.join("android/aosp-patches/0011-mesa-zink-kgsl.patch"),
-    )?;
-    p.patch(
-        source,
-        "vendor/droidloom/mesa3d",
-        &repo.join("android/aosp-patches/0012-mesa-adreno722.patch"),
-    )?;
-    p.patch(
-        source,
-        "vendor/droidloom/mesa3d",
-        &repo.join("android/aosp-patches/0013-mesa-texture-upload-span.patch"),
-    )?;
-    p.patch(
-        source,
-        "vendor/droidloom/mesa3d",
-        &repo.join("android/aosp-patches/0014-mesa-background-cpu-placement.patch"),
-    )?;
-    p.patch(
-        source,
-        "vendor/droidloom/mesa3d",
-        &repo.join("android/aosp-patches/0016-mesa-turnip-hwui-queues.patch"),
-    )?;
-    p.patch(
-        source,
-        "vendor/droidloom/mesa3d",
-        &repo.join("android/aosp-patches/0018-mesa-ir3-alias-array-sources.patch"),
-    )?;
-    p.patch(
-        source,
-        "vendor/droidloom/mesa3d",
-        &repo.join("android/aosp-patches/0019-mesa-turnip-a722-no-bv.patch"),
+    // ir3 keys its shader cache by the digest of Mesa's prepared source and
+    // these patches: a rebuild of the same source keeps the games' shaders.
+    let mut identity = droidloom_mesa::source_identity(&work.join("mesa-source"))?;
+    for name in MESA_PATCHES {
+        let patch = repo.join("android/aosp-patches").join(name);
+        p.patch(source, "vendor/droidloom/mesa3d", &patch)?;
+        identity = sha256_hex(format!("{identity}\n{name} {}", hash(&patch)?));
+    }
+    p.put(
+        &mesa.join("src/freedreno/ir3/droidloom_mesa_identity.h"),
+        format!("#define DROIDLOOM_MESA_IDENTITY \"{identity}\"\n"),
     )?;
     let cross = mesa.join("android/mesa3d_cross.mk");
     let cross_text = fs::read_to_string(&cross)?;

@@ -14,17 +14,45 @@ import android.os.ParcelFileDescriptor;
 import android.os.RemoteException;
 import android.os.ServiceManager;
 import com.android.internal.statusbar.IAddTileResultCallback;
+import com.android.systemui.biometrics.HostCredential;
+import com.android.systemui.biometrics.HostFingerprint;
 import com.android.systemui.compat.EmptyStatusBar;
 import java.io.IOException;
 
 final class StatusBarCallbacks extends EmptyStatusBar {
+    /**
+     * The host shows both ways through: the fingerprint sensor, and its own screen lock where the
+     * app accepts the device credential, the Android credential being Droidloom's own. With both,
+     * the host's screen lock waits behind the fingerprint until the user asks for it, and a
+     * matching finger ends it. A prompt with neither cancels without credential attestation.
+     * SystemUI opens no window.
+     */
     @Override public void showAuthenticationDialog(PromptInfo info,
             IBiometricSysuiReceiver receiver, int[] sensors, boolean credentialAllowed,
             boolean requireConfirmation, int userId, long operationId, String packageName,
             long requestId) throws RemoteException {
-        Unsupported.report("biometric prompt");
-        if (receiver != null) receiver.onDialogDismissed(
-                BiometricPrompt.DISMISSED_REASON_USER_CANCEL, null);
+        if (receiver == null) return;
+        boolean fingerprint = sensors != null && sensors.length > 0;
+        boolean credential = credentialAllowed && HostCredential.show(
+                info, receiver, userId, operationId, packageName, requestId, fingerprint);
+        if (fingerprint) {
+            HostFingerprint.show(receiver, requireConfirmation, requestId, credential);
+        } else if (!credential) {
+            Unsupported.report("credential prompt");
+            receiver.onDialogDismissed(BiometricPrompt.DISMISSED_REASON_USER_CANCEL, null);
+        }
+    }
+    @Override public void onBiometricAuthenticated(int modality) {
+        long requestId = HostFingerprint.authenticated();
+        // BiometricService asks no hide for a dialog SystemUI dismissed itself.
+        if (requestId != 0) HostCredential.hide(requestId);
+    }
+    @Override public void onBiometricError(int modality, int error, int vendorCode) {
+        HostFingerprint.error(error);
+    }
+    @Override public void hideAuthenticationDialog(long requestId) {
+        HostFingerprint.hide(requestId);
+        HostCredential.hide(requestId);
     }
     @Override public void requestAddTile(int uid, ComponentName component,
             CharSequence appName, CharSequence label, Icon icon,

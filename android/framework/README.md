@@ -29,12 +29,17 @@ root/system. Regenerate them with `python3 tools/droidloom-systemui-stubs` when
 advancing the pinned framework interfaces; `--check` verifies the checked-in
 adapters. The updater also checks their source hashes against the build inputs.
 
-Unsupported biometric prompts cancel without credential attestation, quick
+Biometric prompts open no window: the host marks the sensor and runs the reader
+(under Denial, through `denial-fingerprint-verify-v1`), so the asking app stays
+in front. SystemUI starts the sensor at once, answers a match as confirmed and
+hands any error other than a rejected finger or a timeout to the app. A prompt
+with no sensor to use, such as a credential-only request, cancels without
+credential attestation. Quick
 settings tile requests return a negative result, and text toasts complete their
 hidden callback and release the framework token. Screenshot requests complete
 without an image, media projection requests cancel, and shell/proto output file
-descriptors close. A cell with an Android credential configured is reported as
-locked; this initial service has no Android credential-entry UI. Desktop locking
+descriptors close. A cell with an Android credential is reported as locked until the
+framework verifies Droidloom's own; there is no credential-entry UI. Desktop locking
 and notification presentation belong to the host.
 
 The same process hosts event-driven clipboard and notification adapters. Private
@@ -94,6 +99,36 @@ These checks require the prepared AOSP Vulkan headers and a host JDK/C++ compile
 the classpath-only `com.android.virt` projection (see `android/apex-compat`).
 The service would wait forever for its maintenance binder, in the daily idle
 job and after every package removal.
+
+`0009-droidloom-host-fingerprint-enrollment.patch` makes Droidloom's fingerprint
+HAL (`android/authentication`) the owner of its enrollment. The host's fprintd
+fingers are one Android template: internal cleanup adopts it instead of deleting
+it, and drops it when the host has no fingers or Android no credential. The HAL
+replaces `generation` in `/data/vendor/droidloom-authentication` when the
+enrollment or its authenticator ID changes; the provider then enumerates again
+and reloads the authenticator IDs.
+
+`DroidloomCredential` gives Android user 0 a random 32-character password that
+nobody types. The lifecycle daemon keeps it beside the cell's storage on the
+host, readable by root alone, and gives it to system_server at each start
+(`CREDENTIAL`), after checking that the framework's socket belongs to a
+system-user child of the cell's zygote; it never enters Android's storage.
+Fingerprints and auth-bound keys need a credential, and the gatekeeper's secure
+user ID comes from it. Once the user reaches its locked boot and the password
+has arrived, the framework verifies it, which unlocks the user, and
+sets `sys.droidloom.credential=verified`, then asks the activity manager to run
+every process's property callbacks; SystemUI then reports the keyguard gone. The
+window manager marks the keyguard showing before a timeout lock, so SystemUI
+tells the state again on each timeout request.
+
+The keyguard also follows the host session's lock. The lifecycle daemon reads
+logind's `LockedHint` for the owner's graphical session, which the compositor
+sets, and sends each change to the framework (`HOST_LOCK`). The framework sets
+`sys.droidloom.host_locked`; SystemUI reports the keyguard showing while it is
+`1` and tells Trust, which locks Keystore's keys that need an unlocked device.
+At each host unlock the framework verifies the Droidloom credential first, which
+unlocks those keys again.
+A credential Droidloom did not set is left alone, and the cell stays locked.
 
 `droidloom-window-policy` implements the Droidloom replacement for
 PhoneWindowManager. `0004-droidloom-window-policy.patch` selects it at the existing
@@ -219,7 +254,7 @@ When testing over an older installation, also build and activate the matching
 required capabilities, including display power; a stale presenter can reject
 the rebuilt Composer before Android boots. Restart Droidloom after selecting
 the matching components.
-Bundle checks require `DROIDLOOM_TASK_BACKEND_ABI=3;` in services, InputFlinger,
+Bundle checks require `DROIDLOOM_TASK_BACKEND_ABI=4;` in services, InputFlinger,
 the launch client and Composer. Runtime acceptance must cover cold/reused
 launches, aliases/trampolines, permission/authentication handoffs, Play Store
 Open, deep links, shares, task removal/reuse and Composer reconnects. Unit and

@@ -37,6 +37,7 @@ public final class DroidloomFrameworkControl {
         if (started) return;
         if (!DroidloomFrameworkNative.start()) throw new IllegalStateException("Framework native listener unavailable");
         configure();
+        DroidloomCredential.register(service.mContext);
         BroadcastReceiver changes = new BroadcastReceiver() {
             @Override public void onReceive(Context context, Intent intent) { DroidloomFrameworkNative.catalogChanged(); }
         };
@@ -185,6 +186,11 @@ public final class DroidloomFrameworkControl {
                 return display.toString();
             }
             case 8: return DroidloomMediaScan.queue(service.mContext, request.getJSONArray("paths"));
+            case 9: return DroidloomCredential.hostLocked(service.mContext, request.getBoolean("locked"));
+            case 10: return DroidloomCredential.received(service.mContext, request.getString("password"));
+            case 11: return DroidloomCredential.answer(service.mContext, request.getLong("id"),
+                    request.getBoolean("confirmed"));
+            case 12: return DroidloomCredential.chosen(request.getLong("id"));
             default: throw new IllegalArgumentException("Unknown framework operation");
         }
     }

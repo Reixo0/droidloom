@@ -18,6 +18,7 @@ const ALIASES: &[(&str, &str)] = &[
     ("/usr/bin/droidloom-location", "usr/bin/droidloom-location"),
     ("/usr/bin/droidloom-sensors", "usr/bin/droidloom-sensors"),
     ("/usr/bin/droidloom-gpu-server", "usr/bin/droidloom-gpu-server"),
+    ("/usr/bin/droidloom-devices", "usr/bin/droidloom-devices"),
     (
         "/usr/bin/droidloom-applications",
         "usr/bin/droidloom-applications",
@@ -85,6 +86,14 @@ const ALIASES: &[(&str, &str)] = &[
     (
         "/usr/lib/systemd/user/droidloom-gpu.socket",
         "usr/lib/systemd/user/droidloom-gpu.socket",
+    ),
+    (
+        "/usr/lib/systemd/user/droidloom-devices.service",
+        "usr/lib/systemd/user/droidloom-devices.service",
+    ),
+    (
+        "/usr/lib/systemd/user/droidloom-devices.socket",
+        "usr/lib/systemd/user/droidloom-devices.socket",
     ),
     (
         "/etc/polkit-1/rules.d/49-droidloom.rules",

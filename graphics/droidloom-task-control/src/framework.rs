@@ -22,6 +22,14 @@ pub const PACKAGE_ACTION: u16 = 6;
 pub const DISPLAY: u16 = 7;
 /// Ask MediaProvider to rescan shared-storage paths the host changed.
 pub const MEDIA_SCAN: u16 = 8;
+/// Tell the framework whether the host session is locked.
+pub const HOST_LOCK: u16 = 9;
+/// Give the framework Android's hidden credential, which only root keeps.
+pub const CREDENTIAL: u16 = 10;
+/// Answer a credential prompt the framework announced on `credential-events`.
+pub const CREDENTIAL_ANSWER: u16 = 11;
+/// The user turned from a prompt's fingerprint to the host's screen lock.
+pub const CREDENTIAL_CHOSEN: u16 = 12;
 /// Error bit in a response opcode.
 pub const ERROR: u16 = 0x8000;
 

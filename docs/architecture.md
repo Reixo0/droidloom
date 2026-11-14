@@ -70,6 +70,8 @@ The image backend preserves minigbm's native-handle ABI, AIDL allocator and
 stable-C mapper. RGB, HDR, YUV and blob layouts share DMA-BUFs directly with
 the GPU; CPU locks retain DMA-BUF cache synchronization. Imports require one
 shared allocation, linear modifiers, valid strides and non-overlapping planes.
+With GPU forwarding, RGB buffers nobody maps may instead lie in VRAM in a
+modifier of the host GPU's own (`docs/gpu-forwarding.md`); mapping one fails.
 Images are bounded to 16384 pixels per dimension and 1 GiB per allocation; R8
 blobs may exceed the image width limit. Protected allocations are rejected.
 The host presenter still allocates final Wayland targets. Linear images add no
@@ -353,6 +355,27 @@ the shared scheduler without selecting an unrelated faster monitor.
 The Composer refresh path also updates the enabled vsync period and
 reannounces the existing Android display configuration, so SurfaceFlinger
 reloads its cached mode period. Disabled clocks remain disabled.
+
+The same output picks the task's density. The presenter reads
+`$XDG_CONFIG_HOME/droidloom/density-v1.json`, which gives dots per inch per unit
+of output scale: `dpiPerScale` for every output and `outputs` by connector name
+for one. A task on an output of scale 1.5 with 230 per scale gets 345 dpi, so
+its contents keep their logical size on every screen. The private protocol
+carries it as `Density` (minor 11, capability `TASK_DENSITY`), sent before the
+configure it belongs to; the framework sets it as the task's requested
+`densityDpi` override, or drops the override for 0 or the display's own
+density. The file is watched, so a change reaches open windows at once.
+Without it, a task gets 230 per unit of scale.
+
+A window's density is known only once the window exists, after its activity
+started, and a density that arrives then is a configuration change: Android
+relaunches every activity that does not handle one. So the presenter also
+sends, on the bootstrap display's object, the density it expects for the next
+window: that of the task last given one, or of the largest output while no
+window is open. Composer queues it as task command 7, which names no task, and
+keeps it for a restarted framework; the framework creates application tasks
+with it (`Task.Builder` hunk of `0005-droidloom-authoritative-tasks.patch`). A
+window that opens on an output of another density still relaunches once.
 
 ### Vsync
 
@@ -1152,21 +1175,12 @@ Android's NFC switch fails to turn on.
 
 ### Cameras
 
-Android's back and front cameras are the host's, as V4L2 capture devices
-carrying MJPEG. The supervisor looks for the host's devices named `Back
-camera` and `Front camera` (on a phone, v4l2loopback devices with those card
-labels, which the phone's camera service feeds) and creates them in the cell
-as `/dev/video0` and `/dev/video1` for Android's `cameraserver` user and
-`camera` group. AOSP's external camera HAL
-(`android.hardware.camera.provider-V1-external-service`) serves them;
-`android/camera/external_camera_config.xml` makes node 0 a back camera and
-node 1 a front one, with the orientations of a phone's sensors, which
-`android/aosp-patches/0021-camera-external-node-facing.patch` lets the
-configuration say. The host feeds frames turned the way such a sensor sits,
-unmirrored, and decides who may see the camera: it streams only while
-Android reads, and a camera the host refuses streams black. The HAL takes
-photos from the stream, so photos are at its size; there is no focus or
-zoom control, no flash, and no raw.
+Android's cameras are those the host's braun offers. The camera provider
+HAL (`android.hardware.camera.provider-service.droidloom`) lists them and
+opens braun sessions through the user's device broker (`droidloom-devices`),
+then speaks braun's protocol itself: requests are filled from braun's
+preview, JPEG outputs from braun's photos. Without braun Android has no
+camera. The cell has no camera V4L2 nodes.
 App labels supplied by a compromised cell are not trusted host identities.
 
 ### What Linux-generic means

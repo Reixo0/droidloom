@@ -15,6 +15,7 @@ use crate::generated::{
     patch_VkComputePipelineCreateInfo, patch_VkDeviceCreateInfo, patch_VkFenceCreateInfo, patch_VkGraphicsPipelineCreateInfo, patch_VkImageCreateInfo, patch_VkInstanceCreateInfo, patch_VkMemoryAllocateInfo, patch_VkSemaphoreCreateInfo, patch_VkSubmitInfo2,
     TABLE,
 };
+use crate::probe::Shareable;
 use crate::rt::{self, Server, Timeline, SLOTS};
 
 const VK_EXTERNAL_FENCE_HANDLE_TYPE_SYNC_FD_BIT: u32 = 0x8;
@@ -42,6 +43,10 @@ const DEVICE_EXTENSIONS: [&CStr; 8] = [
     c"VK_KHR_external_semaphore_fd",
     c"VK_KHR_push_descriptor",
 ];
+
+/// The least instance version the server works with: it finds the GPU it
+/// shows by PCI address, which a Vulkan 1.0 instance does not report.
+const INSTANCE_VERSION: u32 = (1 << 22) | (1 << 12);
 
 const NATIVE_BUFFER: &CStr = c"VK_ANDROID_native_buffer";
 /// AHardwareBuffers, which the client imports as the DMA-BUFs inside them.
@@ -108,6 +113,22 @@ pub unsafe fn h_vkCreateInstance(s: &mut Server, record: *mut u8) -> *mut u8 {
         let f = record.add(8).cast::<frame::vkCreateInstance>();
         let info: *mut VkInstanceCreateInfo = rt::at(record, (*f).pCreateInfo);
         patch_VkInstanceCreateInfo(s, record, info);
+        // The host instance is the server's too: an application that asks
+        // for Vulkan 1.0, or names no version, still gets its GPU.
+        let own = VkApplicationInfo {
+            sType: VK_STRUCTURE_TYPE_APPLICATION_INFO,
+            pNext: core::ptr::null(),
+            pApplicationName: core::ptr::null(),
+            applicationVersion: 0,
+            pEngineName: core::ptr::null(),
+            engineVersion: 0,
+            apiVersion: INSTANCE_VERSION,
+        };
+        if (*info).pApplicationInfo.is_null() {
+            (*info).pApplicationInfo = &raw const own;
+        } else if (*(*info).pApplicationInfo).apiVersion < INSTANCE_VERSION {
+            (*(*info).pApplicationInfo.cast_mut()).apiVersion = INSTANCE_VERSION;
+        }
         let mut instance: VkInstance = 0;
         let result = (s.fns.vkCreateInstance)(info, core::ptr::null(), &raw mut instance);
         if result == VK_SUCCESS {
@@ -509,20 +530,20 @@ pub unsafe fn h_vkDestroySemaphore(s: &mut Server, record: *mut u8) -> *mut u8 {
 
 // ---------------------------------------------------------------- memory
 
-/// Mappable memory is shared through a memfd, which VRAM cannot back.
-/// Types the driver cannot import a memfd into, and device-local mappable
-/// (ReBAR) types, are offered without their host flags.
-fn hide_unshareable(memory: &mut VkPhysicalDeviceMemoryProperties, importable: u32) {
+/// Mappable memory is shared with the client: system memory through a
+/// memfd, mappable VRAM (ReBAR) through a DMA-BUF. Types the probe found
+/// no way to share are offered without their host flags.
+fn hide_unshareable(memory: &mut VkPhysicalDeviceMemoryProperties, shareable: Shareable) {
     for (index, kind) in memory.memoryTypes[..memory.memoryTypeCount as usize].iter_mut().enumerate() {
-        let rebar = kind.propertyFlags & (DEVICE_LOCAL | HOST_VISIBLE) == DEVICE_LOCAL | HOST_VISIBLE;
-        if rebar || importable & (1 << index) == 0 {
+        let shared = if kind.propertyFlags & DEVICE_LOCAL != 0 { shareable.vram } else { shareable.memfd };
+        if shared & (1 << index) == 0 {
             kind.propertyFlags &= !(HOST_VISIBLE | HOST_COHERENT | HOST_CACHED);
         }
     }
 }
 
-/// The probed importable types of a shown physical device.
-fn host_memory(s: &Server, physical: usize) -> u32 {
+/// The probed shareable types of a shown physical device.
+fn host_memory(s: &Server, physical: usize) -> Shareable {
     let index = *s.shown.get(&physical).unwrap_or_else(|| rt::fail("unknown physical device"));
     *s.host_memory.get(index).unwrap_or_else(|| rt::fail("no memory probe for this GPU"))
 }
@@ -564,9 +585,10 @@ unsafe fn external(info: *const VkMemoryAllocateInfo) -> bool {
     false
 }
 
-/// Host-visible memory is a memfd imported as a host allocation, so the
-/// client maps the very pages the GPU reads. Reply: result, then the
-/// shared size in 4 KiB pages (0 when not shared).
+/// Host-visible memory is shared, so the client maps the very pages the
+/// GPU works on: system memory is a memfd imported as a host allocation,
+/// mappable VRAM the driver's own memory exported as a DMA-BUF. Reply:
+/// result, then the shared size in 4 KiB pages (0 when not shared).
 pub unsafe fn h_vkAllocateMemory(s: &mut Server, record: *mut u8) -> *mut u8 {
     unsafe {
         let f = record.add(8).cast::<frame::vkAllocateMemory>();
@@ -585,6 +607,34 @@ pub unsafe fn h_vkAllocateMemory(s: &mut Server, record: *mut u8) -> *mut u8 {
             return rt::next(record);
         }
         let size = ((*info).allocationSize as usize + 4095) & !4095;
+        if flags & DEVICE_LOCAL != 0 {
+            let export = VkExportMemoryAllocateInfo {
+                sType: VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO,
+                pNext: (*info).pNext,
+                handleTypes: VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT as u32,
+            };
+            (*info).pNext = (&raw const export).cast();
+            let result = (s.fns.vkAllocateMemory)(device, info, core::ptr::null(), &raw mut memory);
+            s.set((*f).pMemory, memory);
+            if result != VK_SUCCESS {
+                *reply = [result as u32, 0];
+                return rt::next(record);
+            }
+            let get = VkMemoryGetFdInfoKHR {
+                sType: VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR,
+                pNext: core::ptr::null(),
+                memory,
+                handleType: VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
+            };
+            let mut fd = -1;
+            let exported = (s.fns.vkGetMemoryFdKHR)(device, &raw const get, &raw mut fd);
+            if exported != VK_SUCCESS {
+                rt::fail(&format!("export mappable VRAM: {exported}"));
+            }
+            *reply = [result as u32, (size >> 12) as u32];
+            s.send_fd(fd);
+            return rt::next(record);
+        }
         let (shm, fd) = Shm::create(size).unwrap_or_else(|error| rt::fail(&format!("create shared memory: {error}")));
         // A host allocation has no dedicated owner; dropping the hint is valid.
         unlink((&raw mut (*info).pNext).cast(), VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO);
@@ -634,8 +684,8 @@ pub use crate::compressed::{
 
 /// A gralloc buffer arrives as a DMA-BUF import chained to its image, which
 /// takes the buffer's memory at creation as `VK_ANDROID_native_buffer`
-/// requires. The memory lives as long as the image. Window buffers drawn
-/// into go through a shadow (shadow.rs).
+/// requires. The memory lives as long as the image. Linear window buffers
+/// drawn into go through a shadow (shadow.rs); one in VRAM is the image.
 pub unsafe fn h_vkCreateImage(s: &mut Server, record: *mut u8) -> *mut u8 {
     unsafe {
         let f = record.add(8).cast::<frame::vkCreateImage>();
@@ -669,7 +719,8 @@ pub unsafe fn create_image(s: &Server, device: usize, info: *const VkImageCreate
     unsafe {
         if let Some(explicit) = find::<VkImageDrmFormatModifierExplicitCreateInfoEXT>((*info).pNext, VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_EXPLICIT_CREATE_INFO_EXT) {
             let e = &*explicit;
-            for plane in 0..e.drmFormatModifierPlaneCount as usize {
+            let planes = if e.drmFormatModifier == 0 { e.drmFormatModifierPlaneCount as usize } else { 0 };
+            for plane in 0..planes {
                 let pitch = (*e.pPlaneLayouts.add(plane)).rowPitch;
                 if pitch % LINEAR_PITCH != 0 {
                     rt::fail(&format!("buffer plane {plane} has a row pitch of {pitch} bytes, not a multiple of {LINEAR_PITCH}"));

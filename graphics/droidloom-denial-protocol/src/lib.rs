@@ -20,7 +20,7 @@ pub const MAGIC: [u8; 4] = *b"DLOM";
 /// Protocol major implemented by this crate.
 pub const PROTOCOL_MAJOR: u16 = 1;
 /// Protocol minor implemented by this crate.
-pub const PROTOCOL_MINOR: u16 = 10;
+pub const PROTOCOL_MINOR: u16 = 12;
 /// Wire version retained by existing records, including initial negotiation.
 pub const BASE_PROTOCOL_MINOR: u16 = 3;
 /// Wire version introducing task activation.
@@ -76,6 +76,10 @@ pub mod capability {
     pub const HOST_CLOCK: u64 = 1 << 13;
     /// Android tells the host which tasks keep the screen on.
     pub const KEEP_SCREEN_ON: u64 = 1 << 14;
+    /// The host gives each task the density of the output it is on.
+    pub const TASK_DENSITY: u64 = 1 << 15;
+    /// Android names the task a dialog-like task opened over.
+    pub const TASK_PARENTS: u64 = 1 << 16;
 
     /// Capabilities required for every protocol-v1 session.
     pub const REQUIRED_V1: u64 = TASK_WINDOWS
@@ -266,6 +270,15 @@ pub enum AndroidMessage {
         /// Whether the host keeps its displays on while the task is visible.
         keep: bool,
     },
+    /// The task opened over `parent` and leaves it running, as a dialog does:
+    /// the host keeps the parent going while the task is in front.
+    /// Requires negotiated `TASK_PARENTS`.
+    SetParent {
+        /// Child task.
+        object: TaskObjectId,
+        /// Parent task, or `None` when the task has none.
+        parent: Option<TaskObjectId>,
+    },
     /// Answer a host liveness probe.
     Pong {
         /// Cookie copied from the matching host ping.
@@ -356,6 +369,13 @@ pub enum DenialMessage {
         transform: Transform,
         /// Current refresh rate in millihertz.
         refresh_millihz: u32,
+    },
+    /// The density Android lays the task out at, for the output it is on.
+    Density {
+        /// Task being laid out.
+        object: TaskObjectId,
+        /// Dots per inch; 0 follows Android's display density.
+        dpi: u32,
     },
     /// Update Denial-owned system-bar and cutout insets.
     Insets {
@@ -1221,6 +1241,7 @@ const OP_BIND_INPUT_CHANNEL: u16 = 0x000f;
 const OP_BIND_INPUT_ROUTE: u16 = 0x0010;
 const OP_REQUEST_RENDER_TARGETS: u16 = 0x0011;
 const OP_SET_KEEP_SCREEN_ON: u16 = 0x0012;
+const OP_SET_PARENT: u16 = 0x0013;
 
 const OP_SERVER_HELLO: u16 = 0x8001;
 const OP_FORMAT_FEEDBACK: u16 = 0x8002;
@@ -1239,6 +1260,7 @@ const OP_DISPLAY_POWER: u16 = 0x800e;
 const OP_REQUEST_INPUT_CHANNEL: u16 = 0x800f;
 const OP_SCENE_PRESENTED: u16 = 0x8010;
 const OP_FRAME_GRANT: u16 = 0x8011;
+const OP_DENSITY: u16 = 0x8012;
 
 /// Encode one Android-to-Denial message.
 ///
@@ -1421,6 +1443,20 @@ pub fn encode_android(message: &AndroidMessage) -> Result<EncodedPacket, WireErr
         AndroidMessage::SetKeepScreenOn { object, keep } => {
             payload.u32(u32::from(*keep));
             (OP_SET_KEEP_SCREEN_ON, valid_object(*object)?, Vec::new())
+        }
+        AndroidMessage::SetParent { object, parent } => {
+            let parent = match parent {
+                Some(parent) if parent == object => {
+                    return Err(WireError::InvalidEnum {
+                        field: "parent task",
+                        value: parent.0,
+                    });
+                }
+                Some(parent) => valid_object(*parent)?,
+                None => 0,
+            };
+            payload.u64(parent);
+            (OP_SET_PARENT, valid_object(*object)?, Vec::new())
         }
         AndroidMessage::Pong { cookie } => {
             payload.u64(*cookie);
@@ -1657,6 +1693,24 @@ pub fn decode_android(
             };
             (AndroidMessage::SetKeepScreenOn { object, keep }, Vec::new())
         }
+        OP_SET_PARENT => {
+            valid_object(object)?;
+            let parent = match payload.u64()? {
+                0 => None,
+                value if value == object.0 => {
+                    return Err(WireError::InvalidEnum {
+                        field: "parent task",
+                        value,
+                    });
+                }
+                value => {
+                    let parent = TaskObjectId(value);
+                    valid_object(parent)?;
+                    Some(parent)
+                }
+            };
+            (AndroidMessage::SetParent { object, parent }, Vec::new())
+        }
         OP_PONG => {
             require_connection(header.object)?;
             (
@@ -1796,6 +1850,10 @@ pub fn encode_denial(message: &DenialMessage) -> Result<EncodedPacket, WireError
             payload.u8(*transform as u8);
             payload.u32(*refresh_millihz);
             (OP_CONFIGURE, valid_object(*object)?)
+        }
+        DenialMessage::Density { object, dpi } => {
+            payload.u32(*dpi);
+            (OP_DENSITY, valid_object(*object)?)
         }
         DenialMessage::Insets {
             object,
@@ -2054,6 +2112,13 @@ pub fn decode_denial(
                 scale_denominator,
                 transform,
                 refresh_millihz,
+            }
+        }
+        OP_DENSITY => {
+            valid_object(object)?;
+            DenialMessage::Density {
+                object,
+                dpi: payload.u32()?,
             }
         }
         OP_INSETS => {
@@ -2319,6 +2384,8 @@ fn finish_packet(
         OP_SCENE_PRESENTED => 8,
         OP_FRAME_GRANT => 9,
         OP_SET_KEEP_SCREEN_ON => 10,
+        OP_DENSITY => 11,
+        OP_SET_PARENT => 12,
         _ => BASE_PROTOCOL_MINOR,
     };
     bytes.extend_from_slice(&minor.to_le_bytes());
@@ -2878,6 +2945,14 @@ mod tests {
                 object: OBJECT,
                 keep: true,
             },
+            AndroidMessage::SetParent {
+                object: OBJECT,
+                parent: Some(TaskObjectId(OBJECT.0 + 1)),
+            },
+            AndroidMessage::SetParent {
+                object: OBJECT,
+                parent: None,
+            },
             AndroidMessage::Pong { cookie: 99 },
         ] {
             round_trip_android(&message);
@@ -2981,6 +3056,10 @@ mod tests {
                 scale_denominator: 2,
                 transform: Transform::Rotate90,
                 refresh_millihz: 120_000,
+            },
+            DenialMessage::Density {
+                object: OBJECT,
+                dpi: 230,
             },
             DenialMessage::Insets {
                 object: OBJECT,

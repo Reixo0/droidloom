@@ -888,7 +888,12 @@
         "soundtrigger/2.2",
         "tv/cec/1.0",
         "tv/tuner/aidl",
-        "soundtrigger/aidl"
+        "soundtrigger/aidl",
+        "camera/common/aidl",
+        "camera/device/aidl",
+        "camera/metadata/aidl",
+        "camera/provider/aidl",
+        "gatekeeper/aidl"
       ]
     },
     {
@@ -1004,7 +1009,23 @@
       "path": "prebuilts/clang/host/linux-x86",
       "name": "platform/prebuilts/clang/host/linux-x86",
       "commit": "29182889399818f97baa65ea238c80e8117981eb",
-      "purpose": "Pinned Android target compiler"
+      "purpose": "Pinned Android target compiler",
+      "sparse_paths": [
+        "clang-3289846",
+        "clang-r547379/AndroidVersion.txt",
+        "clang-r563880c/AndroidVersion.txt",
+        "clang-r584948",
+        "clang-r584948b/AndroidVersion.txt",
+        "clang-r584948b",
+        "clang-stable",
+        "docs",
+        "embedded-sysroots",
+        "kleaf",
+        "llvm-binutils-stable",
+        "mlgo-models",
+        "profiles",
+        "soong"
+      ]
     },
     {
       "path": "prebuilts/go/linux-x86",
@@ -1058,7 +1079,11 @@
       "path": "prebuilts/rust-toolchain/linux-x86",
       "name": "platform/prebuilts/rust-toolchain/linux-x86",
       "commit": "fa2b1777b1f5c0471bb54ad4026feb1f6e94ea70",
-      "purpose": "Pinned Android Rust compiler"
+      "purpose": "Pinned Android Rust compiler",
+      "sparse_paths": [
+        "1.93.1",
+        "stable"
+      ]
     },
     {
       "path": "prebuilts/sdk",
@@ -2022,6 +2047,18 @@
       "name": "platform/external/libfuse",
       "commit": "47f83ca03e9ce8f8dc014605d059e3377ad2eafe",
       "purpose": "FUSE headers required by fuseMedia BPF dependency of the Droidloom vendor image"
+    },
+    {
+      "path": "external/angle",
+      "name": "platform/external/angle",
+      "commit": "1f4500d3906c24de59eec5b9cda17a2ad2a8ba2d",
+      "purpose": "ANGLE GLES-on-Vulkan libraries, rebuilt from the base image's commit so games on ANGLE can carry Droidloom fixes"
+    },
+    {
+      "path": "prebuilts/ndk",
+      "name": "platform/prebuilts/ndk",
+      "commit": "07e4c9cedacc5d60276ab061f52684f57d7dc87e",
+      "purpose": "NDK cpufeatures sources linked into ANGLE's compression utilities"
     }
   ]
 }

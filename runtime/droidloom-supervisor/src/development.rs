@@ -44,17 +44,6 @@ const ANDROID_DENIAL_SOCKET: &str = "dev/socket/droidloom/denial";
 const NFC_DEVICE: &str = "/dev/nfc-nci";
 /// Android's nfc user, which runs the NFC HAL.
 const AID_NFC: u32 = 1027;
-/// The host's cameras for Android's external camera HAL: V4L2 capture
-/// devices with these names (their kernel `name`, a v4l2loopback card
-/// label), which the cell sees as `/dev/video0` and `/dev/video1`; the HAL's
-/// configuration makes them its back and front cameras.
-const CAMERA_DEVICES: [(&str, &str); 2] = [
-    ("Back camera", "dev/video0"),
-    ("Front camera", "dev/video1"),
-];
-/// Android's cameraserver user and camera group, which run the camera HAL.
-const AID_CAMERASERVER: u32 = 1047;
-const AID_CAMERA: u32 = 1006;
 /// The host's video decoder for the V4L2 Codec2 service: the V4L2 memory to
 /// memory device whose kernel `name` ends with this (qcom-iris-decoder,
 /// qcom-venus-decoder), which the cell sees after the cameras.
@@ -725,6 +714,10 @@ fn cleanup_runtime_directory(spec: &CellSpec) -> Result<(), DevelopmentError> {
             spec.runtime_dir.join("android-product.prop"),
             "remove Android product properties",
         ),
+        (
+            spec.runtime_dir.join("android-servicemanager.rc"),
+            "remove servicemanager service",
+        ),
     ] {
         match fs::remove_file(path) {
             Ok(()) => {}
@@ -918,6 +911,8 @@ pub fn enter_development_cell(spec: &CellSpec) -> Result<(), DevelopmentError> {
     mount_host_storage(&spec.data_dir.join("metadata"), &root.join("metadata"))?;
     mount_proc_and_sys(spec, &root)?;
     create_private_dev(spec, &root)?;
+    crate::authentication::prepare(spec, &root)
+        .map_err(|source| io_error("prepare Android authentication secrets", source))?;
     mount_first_stage_runtime_filesystems(&root)?;
     bind_boot_parameters(spec, &root)?;
     let controllers = crate::cpu_placement::prepare(&root, spec.id().as_str())
@@ -933,6 +928,7 @@ pub fn enter_development_cell(spec: &CellSpec) -> Result<(), DevelopmentError> {
     }
     bind_adb_configuration(spec, &root)?;
     bind_product_properties(spec, &root)?;
+    bind_root_servicemanager(spec, &root)?;
 
     // The reusable base is a system-as-root image, but Droidloom has already
     // supplied the mounts that Android first-stage init normally constructs.
@@ -944,9 +940,15 @@ pub fn enter_development_cell(spec: &CellSpec) -> Result<(), DevelopmentError> {
     // Do not inherit a host renderer override accidentally. The explicit
     // pairing applies to all Android children, including mapper clients.
     init.env_remove("MESA_LOADER_DRIVER_OVERRIDE")
-        .env_remove("vendor.minigbm.allocator");
+        .env_remove("vendor.minigbm.allocator")
+        .env_remove("vendor.minigbm.vram");
     if spec.graphics_backend != crate::GraphicsBackend::Drm {
         init.env("vendor.minigbm.allocator", "dma_heap_images");
+    }
+    // The forwarded driver lists the host GPU's layouts the compositor
+    // imports; buffers nobody maps then lie in VRAM in one of them.
+    if spec.graphics_backend == crate::GraphicsBackend::Forwarding {
+        init.env("vendor.minigbm.vram", "vulkan");
     }
     if spec.graphics_backend == crate::GraphicsBackend::KgslDmaHeap {
         init.env("MESA_LOADER_DRIVER_OVERRIDE", "zink");
@@ -2001,14 +2003,6 @@ fn create_private_dev(spec: &CellSpec, root: &Path) -> Result<(), DevelopmentErr
             eprintln!("droidloom-supervisor: no NFC for Android: {error}");
         }
     }
-    for (name, target) in CAMERA_DEVICES {
-        let Some(device) = video_device_named(name) else {
-            continue;
-        };
-        if let Err(error) = create_camera_device(root, &device, target) {
-            eprintln!("droidloom-supervisor: no {name} for Android: {error}");
-        }
-    }
     // Hardware video decoding: the host's decoder, for mediacodec alone.
     if let Some(device) = video_device_named_suffix(VIDEO_DECODER_NAME_SUFFIX) {
         if let Err(error) = create_video_decoder_device(root, &device) {
@@ -2042,10 +2036,21 @@ fn create_private_dev(spec: &CellSpec, root: &Path) -> Result<(), DevelopmentErr
         create_mount_target(&target)?;
         bind_mount(&text_socket, &target, false)?;
     }
-    // Audio, location, sensors and the GPU server are separate user brokers. Their
-    // systemd-owned sockets survive broker restarts, preserving the inodes
-    // bind-mounted into the Android cell.
-    for name in ["clipboard", "notifications", "audio", "location", "sensors", "gpu"] {
+    // Audio, location, sensors, the GPU server and the device broker (haptics,
+    // camera, fingerprint) are separate user brokers. Their systemd-owned
+    // sockets survive broker restarts, preserving the inodes bind-mounted into
+    // the Android cell.
+    for name in [
+        "clipboard",
+        "notifications",
+        "audio",
+        "location",
+        "sensors",
+        "gpu",
+        "haptics",
+        "camera",
+        "fingerprint",
+    ] {
         let socket = spec.denial_socket.with_file_name(format!("{name}.sock"));
         if socket.exists() {
             if !fs::symlink_metadata(&socket)
@@ -2057,7 +2062,10 @@ fn create_private_dev(spec: &CellSpec, root: &Path) -> Result<(), DevelopmentErr
                     "{name} endpoint is not a socket"
                 )));
             }
-            let target = if matches!(name, "audio" | "location" | "sensors" | "gpu") {
+            let target = if matches!(
+                name,
+                "audio" | "location" | "sensors" | "gpu" | "haptics" | "camera" | "fingerprint"
+            ) {
                 root.join("dev/socket/droidloom").join(name)
             } else {
                 framework_host.join(name)
@@ -2084,20 +2092,6 @@ fn create_nfc_device(root: &Path) -> Result<(), DevelopmentError> {
     set_owner(&target, AID_NFC, AID_NFC)
 }
 
-/// The host's V4L2 device whose kernel name is `name`.
-fn video_device_named(name: &str) -> Option<PathBuf> {
-    let mut found: Vec<PathBuf> = fs::read_dir("/sys/class/video4linux")
-        .ok()?
-        .flatten()
-        .filter(|entry| {
-            fs::read_to_string(entry.path().join("name")).is_ok_and(|text| text.trim_end() == name)
-        })
-        .map(|entry| Path::new("/dev").join(entry.file_name()))
-        .collect();
-    found.sort();
-    found.into_iter().next()
-}
-
 /// The host's first V4L2 device whose kernel name ends with `suffix`.
 fn video_device_named_suffix(suffix: &str) -> Option<PathBuf> {
     let mut found: Vec<PathBuf> = fs::read_dir("/sys/class/video4linux")
@@ -2118,13 +2112,6 @@ fn create_video_decoder_device(root: &Path, device: &Path) -> Result<(), Develop
     let target = root.join(VIDEO_DECODER_TARGET);
     make_device_node(&target, "c", major, minor, "660")?;
     set_owner(&target, AID_MEDIA_CODEC, AID_MEDIA_CODEC)
-}
-
-fn create_camera_device(root: &Path, device: &Path, target: &str) -> Result<(), DevelopmentError> {
-    let (major, minor) = auxiliary_graphics_device_numbers(device)?;
-    let target = root.join(target);
-    make_device_node(&target, "c", major, minor, "660")?;
-    set_owner(&target, AID_CAMERASERVER, AID_CAMERA)
 }
 
 fn auxiliary_graphics_device_numbers(path: &Path) -> Result<(u32, u32), DevelopmentError> {
@@ -2336,6 +2323,30 @@ fn bind_product_properties(spec: &CellSpec, root: &Path) -> Result<(), Developme
     bind_mount(&source, &target, true)
 }
 
+/// Android's system user is the host user in a cell. servicemanager, which
+/// tells every process where each service is, runs as root so that user can
+/// neither change its answers nor kill it; its patch keeps the authentication
+/// services' names for root.
+fn bind_root_servicemanager(spec: &CellSpec, root: &Path) -> Result<(), DevelopmentError> {
+    let target = root.join("system/etc/init/servicemanager.rc");
+    let original =
+        fs::read_to_string(&target).map_err(|e| io_error("read servicemanager service", e))?;
+    let service = root_servicemanager(&original).ok_or_else(|| {
+        DevelopmentError::InvalidInput("servicemanager.rc has no `user system` line".into())
+    })?;
+    let source = spec.runtime_dir.join("android-servicemanager.rc");
+    fs::write(&source, service).map_err(|e| io_error("write servicemanager service", e))?;
+    set_mode(&source, 0o644)?;
+    bind_mount(&source, &target, true)
+}
+
+fn root_servicemanager(original: &str) -> Option<String> {
+    const SYSTEM: &str = "\n    user system\n";
+    original
+        .contains(SYSTEM)
+        .then(|| original.replacen(SYSTEM, "\n    user root\n", 1))
+}
+
 fn bind_cpu_policy(spec: &CellSpec, root: &Path, policy: &str) -> Result<(), DevelopmentError> {
     let directory = spec.runtime_dir.join("cgroup-policy");
     // Preserve the already projected init file, including the classpath and
@@ -2541,6 +2552,15 @@ fn io_error(context: &str, source: io::Error) -> DevelopmentError {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn servicemanager_runs_as_root_and_keeps_its_groups() {
+        let original = "service servicemanager /system/bin/servicemanager\n    class core animation\n    user system\n    group system readproc\n    critical\n";
+        let service = root_servicemanager(original).unwrap();
+        assert!(service.contains("\n    user root\n    group system readproc\n"));
+        assert!(!service.contains("user system"));
+        assert_eq!(root_servicemanager("service servicemanager x\n    user root\n"), None);
+    }
 
     #[test]
     fn physical_input_hotplug_cannot_create_nodes() {

@@ -7,6 +7,7 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 mod adb;
+mod authentication;
 mod app_properties;
 pub mod boot_notice;
 pub mod control;
@@ -20,6 +21,7 @@ pub mod host_storage;
 mod identity;
 pub mod linux_plan;
 mod package_cache;
+pub mod storage_backup;
 pub mod storage_migration;
 mod tracing;
 mod user_folders;

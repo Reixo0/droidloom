@@ -8,14 +8,21 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+async-io = "2.6.0"
+futures-lite = "2.6.1"
+zbus = { version = "5.18.0", default-features = false, features = ["async-io"] }
 droidloom-cpu-placement = { path = "../droidloom-cpu-placement" }
 clap.workspace = true
 droidloom-contracts = { path = "../droidloom-contracts" }
 droidloom-window-policy = { path = "../droidloom-window-policy" }
 droidloom-task-control = { path = "../../graphics/droidloom-task-control" }
+droidloom-denial-ipc = { path = "../../graphics/droidloom-denial-ipc" }
+droidloom-device-protocol = { path = "../droidloom-device-protocol" }
 libc.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
+hex.workspace = true
 thiserror.workspace = true
 tempfile.workspace = true
 

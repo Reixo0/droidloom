@@ -11,6 +11,7 @@ import android.app.WaitResult;
 import android.content.ComponentName;
 import android.content.Intent;
 import android.content.pm.ActivityInfo;
+import android.content.res.Configuration;
 import android.graphics.Rect;
 import android.os.Binder;
 import android.os.Handler;
@@ -35,10 +36,14 @@ final class DroidloomTaskBackend {
     private final Handler mWorker;
     // Accessed only under mService.mGlobalLock.
     private final IdentityHashMap<Task, Long> mIncarnations = new IdentityHashMap<>();
+    // The task in front when each task was created, under mService.mGlobalLock.
+    private final IdentityHashMap<Task, Task> mCreatedOver = new IdentityHashMap<>();
     private final IdentityHashMap<WaitResult, ActivityRecord> mLaunches = new IdentityHashMap<>();
     // A new system_server in the same boot must not reuse earlier incarnations.
     private long mNextIncarnation = SystemClock.elapsedRealtimeNanos();
     private Task mHostFocused;
+    // The density the host expects to give the next window; 0 is the display's own.
+    private int mNewTaskDensity;
     // Tasks with a shown FLAG_KEEP_SCREEN_ON window, as of the last surface placement.
     private final IdentityHashMap<Task, Boolean> mKeepScreenOn = new IdentityHashMap<>();
     private final IdentityHashMap<Task, Boolean> mPlacedKeepScreenOn = new IdentityHashMap<>();
@@ -52,13 +57,14 @@ final class DroidloomTaskBackend {
 
     private static final class Snapshot {
         final Task token;
-        final int id, user, display;
+        final int id, user, display, parent;
         final long incarnation;
         final String owner;
         final boolean ready, focused, hostFocused, keepScreenOn;
         final Rect bounds;
         final IBinder inputToken;
-        Snapshot(Task task, long incarnation, boolean hostFocused, boolean keepScreenOn) {
+        Snapshot(Task task, long incarnation, boolean hostFocused, boolean keepScreenOn,
+                Task createdOver, int lastParent) {
             token = task; id = task.mTaskId; user = task.mUserId;
             display = task.getDisplayId(); this.incarnation = incarnation;
             owner = task.realActivity == null ? null : task.realActivity.getPackageName();
@@ -70,10 +76,21 @@ final class DroidloomTaskBackend {
             focused = task.isFocused();
             this.hostFocused = hostFocused;
             this.keepScreenOn = keepScreenOn;
+            // As on Android, a task that does not cover the one it opened over,
+            // such as a dialog, leaves that task running: the host gets it as
+            // the window's parent. Only when that task's app started it, so a
+            // launch from the host is never a dialog of the app it replaces.
+            // A finished dialog keeps its parent until its window goes, so
+            // the host hands the front back to that task.
+            ActivityRecord root = task.getRootActivity();
+            parent = top == null ? lastParent
+                    : top.occludesParent() || root == null || createdOver == null
+                    || !createdOver.isAttached() || root.launchedFromUid != createdOver.effectiveUid
+                    ? 0 : createdOver.mTaskId;
         }
         long[] publish(boolean activate) {
             return DroidloomTaskNative.registerTask(id, incarnation, user, display, owner, activate,
-                    keepScreenOn);
+                    keepScreenOn, parent);
         }
         boolean sameInput(Snapshot other) {
             return other != null && incarnation == other.incarnation && display == other.display
@@ -139,7 +156,9 @@ final class DroidloomTaskBackend {
             incarnation = ++mNextIncarnation;
             mIncarnations.put(task, incarnation);
         }
-        return new Snapshot(task, incarnation, task == mHostFocused, mKeepScreenOn.containsKey(task));
+        Snapshot published = mPublished.get(task);
+        return new Snapshot(task, incarnation, task == mHostFocused, mKeepScreenOn.containsKey(task),
+                mCreatedOver.get(task), published == null ? 0 : published.parent);
     }
 
     private ArrayList<Snapshot> snapshot() {
@@ -155,6 +174,7 @@ final class DroidloomTaskBackend {
                 }
             }, true);
             mIncarnations.keySet().retainAll(live.keySet());
+            mCreatedOver.keySet().retainAll(live.keySet());
         }
         return tasks;
     }
@@ -235,7 +255,15 @@ final class DroidloomTaskBackend {
     }
 
     private void applyCommand(long[] command) {
-        if (command.length != 7 || command[1] <= 0 || command[1] > Integer.MAX_VALUE
+        if (command.length != 7) return;
+        if (command[4] == 7) {
+            // For the tasks to come: it names none.
+            if (command[1] != 0 || command[2] != 0 || command[3] != 0
+                    || (command[5] != 0 && (command[5] < 72 || command[5] > 1280))) return;
+            synchronized (mService.mGlobalLock) { mNewTaskDensity = (int) command[5]; }
+            return;
+        }
+        if (command[1] <= 0 || command[1] > Integer.MAX_VALUE
                 || command[2] <= 0 || command[3] != 0) return;
         synchronized (mService.mGlobalLock) {
             final Task task = mService.mRootWindowContainer.anyTaskForId((int) command[1],
@@ -268,12 +296,65 @@ final class DroidloomTaskBackend {
                 case 4:
                 case 5:
                     setHostHidden(task, command[4] == 4);
+                    if (command[4] == 4) {
+                        // Hiding a task moves Android's focus to the one below
+                        // it, such as the app behind a dialog. That is the
+                        // host's doing, not that app asking for the front.
+                        final Task below =
+                                mService.mRootWindowContainer.getTopDisplayFocusedRootTask();
+                        final Task leaf = below == null ? null : below.getTopLeafTask();
+                        if (leaf != null && leaf != task) mHostFocused = leaf;
+                    }
+                    break;
+                case 6:
+                    if (command[5] != 0 && (command[5] < 72 || command[5] > 1280)) return;
+                    setHostDensity(task, (int) command[5]);
                     break;
                 default:
                     throw new IllegalArgumentException("Unknown host window command");
             }
         }
         schedule();
+    }
+
+    /**
+     * Task.Builder made an application task, not yet attached. It starts at the
+     * density the host expects to give its window, so its first activity is
+     * created laid out for it: a density that arrives after the activity started
+     * is a configuration change, and relaunches every activity that does not
+     * handle one. Set directly, as the builder sets the activity type:
+     * onParentChanged resolves it.
+     */
+    void taskCreated(Task task) {
+        if (mNewTaskDensity != 0) {
+            task.getRequestedOverrideConfiguration().densityDpi = mNewTaskDensity;
+        }
+        // Under the global lock, before the new task moves to the front.
+        final Task focused = mService.mRootWindowContainer.getTopDisplayFocusedRootTask();
+        final Task front = focused == null ? null : focused.getTopLeafTask();
+        if (front != null && front != task) mCreatedOver.put(task, front);
+    }
+
+    /**
+     * Lays the task out at the density of the host output its window is on,
+     * so it keeps its size in that output's units on every screen. 0, or the
+     * display's own density, drops the override. Activities that do not
+     * handle density changes relaunch, as for any configuration change.
+     */
+    private void setHostDensity(Task task, int dpi) {
+        final int inherited = task.getParent().getConfiguration().densityDpi;
+        final int wanted = dpi == 0 || dpi == inherited
+                ? Configuration.DENSITY_DPI_UNDEFINED : dpi;
+        final Configuration requested = task.getRequestedOverrideConfiguration();
+        if (requested.densityDpi == wanted) return;
+        final Configuration changed = new Configuration(requested);
+        changed.densityDpi = wanted;
+        task.onRequestedOverrideConfigurationChanged(changed);
+        // As WindowOrganizerController does for a configuration-only change.
+        task.forAllActivities(r -> {
+            if (r.isVisibleRequested()) r.ensureActivityConfiguration(true /* ignoreVisibility */);
+        });
+        mService.mWindowManager.mWindowPlacerLocked.requestTraversal();
     }
 
     /**

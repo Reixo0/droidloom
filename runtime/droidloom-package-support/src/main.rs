@@ -21,6 +21,7 @@ const RULE: &str = "/etc/polkit-1/rules.d/49-droidloom.rules";
 const HELPER: &str = "/usr/lib/droidloom/droidloom-package-helper";
 const RECIPE: &str = "/usr/share/droidloom/cell-template.json";
 const VERSION: &str = "/usr/share/droidloom/package.json";
+const GAPPS: &str = "/usr/lib/droidloom/addons/gapps";
 
 #[derive(Parser)]
 #[command(
@@ -37,7 +38,7 @@ enum Action {
     Prepare,
     /// List the host's GPUs, or choose the one Android renders on.
     Gpu {
-        /// auto, amd, intel, nvidia or a PCI address.
+        /// auto, amd, intel, nvidia, qualcomm, mali or a PCI address.
         choice: Option<GpuChoice>,
     },
     #[command(hide = true)]
@@ -173,7 +174,7 @@ fn chosen_gpu(spec: Option<&Value>) -> Result<GpuChoice> {
 /// The rendering `choice` names among the GPUs `sys` lists.
 fn graphics(sys: &Path, choice: &GpuChoice) -> Result<Graphics> {
     Graphics::resolve(choice, &HostGpu::list(sys)?).map_err(|error| {
-        format!("Droidloom needs an AMD, Intel or NVIDIA GPU: {error}. Configuration was not changed.").into()
+        format!("Droidloom needs an AMD, Intel, NVIDIA, Qualcomm Adreno or Arm Mali GPU: {error}. Configuration was not changed.").into()
     })
 }
 /// What the GPU server reads: the forwarded GPU, if any.
@@ -186,6 +187,14 @@ fn environment(graphics: &Graphics) -> String {
         text.push_str(&format!("DROIDLOOM_GPU={pci}\n"));
     }
     text
+}
+/// Google apps start with Android's storage and cannot join it later, so the
+/// first setup selects an installed add-on while Android has never booted on
+/// the storage.
+fn selects_gapps(previous: Option<&Value>, addon: &Path, data: &Path) -> bool {
+    previous.is_none()
+        && addon.is_dir()
+        && fs::read_dir(data.join("data")).map_or(true, |mut entries| entries.next().is_none())
 }
 fn configuration(
     mut recipe: Value,
@@ -338,14 +347,18 @@ fn setup(
         None => chosen_gpu(previous.as_ref())?,
     };
     let graphics = graphics(Path::new("/sys/class/drm"), &choice)?;
-    let spec = configuration(
+    let mut spec = configuration(
         read_json(Path::new(RECIPE))?,
         previous.as_ref(),
         uid,
         &choice,
         &graphics,
     )?;
-    let data = Path::new(spec["data_dir"].as_str().unwrap());
+    let data = PathBuf::from(spec["data_dir"].as_str().unwrap());
+    if selects_gapps(previous.as_ref(), Path::new(GAPPS), &data) {
+        spec["gapps_dir"] = json!(GAPPS);
+    }
+    let data = data.as_path();
     root_directory(data, 0o700)?;
     droidloom_supervisor::host_storage::prepare(data)?;
     let old_state: Option<SetupState> = optional_json(Path::new(STATE))?
@@ -392,7 +405,7 @@ fn gpu(choice: Option<GpuChoice>) -> Result<()> {
             Ok(graphics) => println!("GPU choice {current}: {graphics}."),
             Err(error) => println!("GPU choice {current}: {error}"),
         }
-        println!("Choose with: droidloomctl gpu auto|amd|intel|nvidia|PCI-ADDRESS");
+        println!("Choose with: droidloomctl gpu auto|amd|intel|nvidia|qualcomm|mali|PCI-ADDRESS");
         return Ok(());
     };
     let graphics = graphics(sys, &choice)?;
@@ -534,7 +547,7 @@ mod tests {
         recipe
     }
     fn drm(node: u32) -> Graphics {
-        let gpu = HostGpu { render_node: format!("/dev/dri/renderD{node}"), pci: "0000:0a:00.0".into(), driver: "amdgpu".into() };
+        let gpu = HostGpu { render_node: format!("/dev/dri/renderD{node}"), device: "0000:0a:00.0".into(), driver: "amdgpu".into() };
         Graphics::resolve(&GpuChoice::Auto, &[gpu]).unwrap()
     }
     #[test]
@@ -560,6 +573,19 @@ mod tests {
                 .is_empty()
         );
         assert!(configuration(recipe(), Some(&previous), 1000, &GpuChoice::Auto, &drm(128)).is_err());
+    }
+    #[test]
+    fn first_setup_selects_installed_gapps_for_fresh_storage_only() {
+        let root = tempfile::tempdir().unwrap();
+        let (addon, data) = (root.path().join("gapps"), root.path().join("storage"));
+        assert!(!selects_gapps(None, &addon, &data));
+        fs::create_dir(&addon).unwrap();
+        assert!(selects_gapps(None, &addon, &data));
+        fs::create_dir_all(data.join("data")).unwrap();
+        assert!(selects_gapps(None, &addon, &data));
+        assert!(!selects_gapps(Some(&json!({})), &addon, &data));
+        fs::create_dir(data.join("data/system")).unwrap();
+        assert!(!selects_gapps(None, &addon, &data));
     }
     #[test]
     fn gpu_choice_reaches_the_spec_and_the_server() {

@@ -466,14 +466,17 @@ dependencies = [
 name = "droidloom-applications"
 version = "0.1.0"
 dependencies = [
+ "async-io",
  "clap",
  "droidloom-contracts",
  "droidloom-cpu-placement",
  "droidloom-supervisor",
+ "futures-lite",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror",
+ "zbus",
 ]
 
 [[package]]
@@ -504,6 +507,17 @@ dependencies = [
  "droidloom-denial-ipc",
  "libc",
  "tempfile",
+]
+
+[[package]]
+name = "droidloom-authentication"
+version = "0.1.0"
+
+[[package]]
+name = "droidloom-camera"
+version = "0.1.0"
+dependencies = [
+ "droidloom-device-protocol",
 ]
 
 [[package]]
@@ -569,6 +583,26 @@ version = "0.1.0"
 dependencies = [
  "droidloom-transport",
  "thiserror",
+]
+
+[[package]]
+name = "droidloom-device-protocol"
+version = "0.1.0"
+
+[[package]]
+name = "droidloom-devices"
+version = "0.1.0"
+dependencies = [
+ "async-channel",
+ "async-io",
+ "clap",
+ "droidloom-denial-ipc",
+ "droidloom-device-protocol",
+ "futures-lite",
+ "libc",
+ "wayland-client",
+ "wayland-scanner",
+ "zbus",
 ]
 
 [[package]]
@@ -643,6 +677,8 @@ version = "0.1.0"
 dependencies = [
  "droidloom-gpu-protocol",
  "libc",
+ "wayland-client",
+ "wayland-protocols",
 ]
 
 [[package]]
@@ -654,6 +690,13 @@ dependencies = [
  "libc",
  "wayland-client",
  "wayland-protocols",
+]
+
+[[package]]
+name = "droidloom-haptics"
+version = "0.1.0"
+dependencies = [
+ "droidloom-device-protocol",
 ]
 
 [[package]]
@@ -771,16 +814,23 @@ dependencies = [
 name = "droidloom-supervisor"
 version = "0.1.0"
 dependencies = [
+ "async-io",
  "clap",
  "droidloom-contracts",
  "droidloom-cpu-placement",
+ "droidloom-denial-ipc",
+ "droidloom-device-protocol",
  "droidloom-task-control",
  "droidloom-window-policy",
+ "futures-lite",
+ "hex",
  "libc",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror",
+ "zbus",
 ]
 
 [[package]]

@@ -10,7 +10,9 @@ follow [BUILDING.md](BUILDING.md), then return here.
 
 - An x86_64 machine running Arch Linux, or an aarch64 machine running Arch
   Linux ARM, with a Wayland desktop.
-- An AMD, Intel or NVIDIA GPU. AMD and Intel render natively. NVIDIA, on
+- An AMD, Intel or NVIDIA GPU, or on aarch64 a Qualcomm Adreno through the
+  kernel's `msm` driver or an Arm Mali through `panthor` or `panfrost`. AMD,
+  Intel, Adreno and Mali render natively. NVIDIA, on
   x86_64, renders through [GPU forwarding](gpu-forwarding.md) and needs the
   proprietary driver with its Vulkan driver (`nvidia-utils`) and the
   `nvidia-drm` module. With several GPUs, setup picks NVIDIA when there is one;
@@ -325,7 +327,36 @@ sudo pacman -R droidloom-runtime droidloom-image
 Sudo lets pacman stop the system service, remove package-owned files and update
 its database. Removal cleans exported desktop launchers and the generated service
 permission. **Android app data and personal configuration are retained**, so a
-reinstall is not a factory reset. Back them up before any deliberate data reset.
+reinstall is not a factory reset. Back them up before any deliberate data reset
+(see the next section).
+
+## Back up and restore Android
+
+```console
+droidloomctl backup ~/android-backup.tar.zst
+sudo droidloomctl restore ~/android-backup.tar.zst
+```
+
+A backup holds all of Android's storage: apps, their data, accounts and the
+emulated storage. It leaves out the host folders shared into Android, which are
+ordinary files in your home. Android stops while the backup is written and
+starts again after. The file is a zstd-compressed tar whose first member lists
+every entry with its owner, permissions, ACLs, extended attributes and SHA-256.
+`backup` never overwrites an existing file; `-` writes to standard output, so
+a phone can be backed up from another computer:
+
+```console
+ssh phone droidloomctl backup - > android-backup.tar.zst
+ssh phone sudo droidloomctl restore - < android-backup.tar.zst
+```
+
+`restore` needs root. It unpacks next to the current storage, checks every
+entry against the list, and only then puts it in place. The storage it replaces
+is renamed to `DATA_DIR.before-restore-DATE`, never deleted: remove it once the
+restored apps and accounts work. A damaged or incomplete archive is refused and
+the current storage stays as it was. Restore on the Droidloom release that
+wrote the backup: Android's keys can fail to unlock on a different release,
+and `restore` warns when the releases differ.
 
 For launch failures, collect diagnostics before restarting:
 

@@ -63,7 +63,7 @@ compiler filter, profile and app image the base used for each. The result, with
 the base's other oat files unchanged, replaces `/system/framework/oat/<isa>`. The package
 must contain window-policy ABI 1 metadata in both compiled artifacts; native
 architecture must match the cell, and JNI checks the ABI again before WMS starts.
-The framework task backend additionally requires task-backend ABI 3 metadata
+The framework task backend additionally requires task-backend ABI 4 metadata
 in services, InputFlinger and Composer. Native input ABI 2
 pairs services, InputFlinger and Composer; host channels ABI 1 pairs services,
 SystemUI, IME and the presenter. The standalone input support process and its
@@ -200,6 +200,83 @@ disabled. These projections may contain executable compatibility helpers, but
 they are not Android-writable storage and cannot target `/system`, `/vendor`,
 `/data`, or another Android namespace.
 
+## Private haptics, camera and fingerprint endpoints (DLDEV001)
+
+The user `droidloom-devices.socket` unit owns `%t/droidloom/haptics.sock`,
+`%t/droidloom/camera.sock` and `%t/droidloom/fingerprint.sock` under the same
+mode-0700 runtime directory. The supervisor may bind only those inodes at
+`/dev/socket/droidloom/haptics`, `/dev/socket/droidloom/camera` and
+`/dev/socket/droidloom/fingerprint`. One broker, `droidloom-devices`, runs as
+the host user and serves all three; it authenticates the kernel-mapped UID of
+the vibrator HAL (system, 1000), the camera provider (cameraserver, 1047) and
+the authentication service (root, 0) on each.
+
+Records carry `DLDEV001`, a kind and bounded fields. Haptics clients send
+patterns of at most 64 steps and 30 seconds, which the broker plays through
+hapticd on the system bus; a client that disconnects stops its pattern. Camera
+clients list braun's cameras or ask for a braun session, which the broker
+passes on as braun's own session descriptor; the HAL then speaks braun's
+protocol directly. Fingerprint clients ask for the reader and the user's
+enrolled fingers, and start or cancel a verification. Where the compositor
+offers `denial_fingerprint_verifier_v1` (Denial), the broker asks it: Denial
+runs the reader, lights the panel and marks the sensor, and a pending
+verification waits while the session is locked. Elsewhere the broker claims
+fprintd's reader for each verification only, listens again after a no-match,
+and stops and releases the reader however it ends. Without hapticd, braun or
+fprintd the broker reports no vibrator, no cameras and no reader.
+
+The broker only runs the reader: the authentication service counts a match
+once the supervisor, as root, has seen fprintd announce it on the system bus,
+and passes it through `/dev/socket/droidloom-authentication` (root, 0600).
+
+## Credential prompts
+
+An Android app that asks to confirm the device credential gets the host
+user's screen lock. SystemUI hands the prompt to `system_server`'s
+`droidloom.credential` service, which accepts SystemUI alone and announces it
+on `/dev/socket/droidloom-framework/credential-events` (system, 0600; root
+peers only): each open prompt when the supervisor connects, then each new one
+and each end, as a big-endian `u32` length and JSON (`{"ask":ID, "app",
+"title", "description", "fingerprint"}` or `{"end":ID}`). `fingerprint` says
+the prompt also takes the host's fingerprint: the sheet waits folded behind
+it, and a matching finger ends the prompt. When the user turns from the
+fingerprint to the sheet, the broker says so and the supervisor sends
+framework operation 12; `system_server` presses Android's own button to the
+device credential, and BiometricService stops the fingerprint.
+
+For each prompt the supervisor connects, as root, to the broker's fourth
+socket, `%t/droidloom/credential.sock` in the same unit, after checking that
+the socket and its peer are the cell owner's. The broker shows the
+compositor's sheet (`denial_user_verifier_v1`) and passes what the user types
+back; other compositors lack the global and the prompt ends as cancelled. The
+supervisor checks the PIN with the gatekeeper provider that holds the lock
+PIN (`/run/gatekeeper/worker.sock`, else `software.sock`), using the handle
+in the user's Denial PIN record, and the password with PAM's `login` stack.
+It answers with framework operation 11; `system_server` then attests a
+confirmed prompt with Gatekeeper and Android's hidden credential for the
+prompt's operation, as Android's credential screen would, and BiometricService
+adds the token to Keystore. Neither the broker nor the compositor can confirm
+a prompt.
+
+## Authentication secrets
+
+Android's system user is the host user in a cell, so what makes an Android
+unlock or a fingerprint match stays with root:
+
+- At each start the supervisor writes a fresh 32-byte key agreement key at
+  `/dev/droidloom-agreement-key` (nobody, 0400). KeyMint and the
+  authentication service derive their shared HMAC key from it.
+- Android's hidden credential is `credential` in the cell's data directory
+  (root, 0600), outside Android's storage. The supervisor moves one an earlier
+  release left at `data/system/droidloom/credential` there, without following
+  links, and gives it only to system_server (`CREDENTIAL`, framework op 10).
+- servicemanager runs as root. In the cell it lets only root register the
+  fingerprint, gatekeeper and `ISharedSecret/droidloom` names, only KeyMint's
+  user (or root) register KeyMint's, and no process take over a name a live
+  service holds.
+- The authentication service runs as root and keeps its key and records in
+  `/data/vendor/droidloom-authentication/private` (root, 0700).
+
 ## Private audio endpoint (DLAUD001)
 
 The user `droidloom-audio.socket` unit owns `%t/droidloom/audio.sock` under a
@@ -297,7 +374,10 @@ an incoming VM relay listener. This avoids a `traced` restart loop on hosts
 without AF_VSOCK while preserving normal tracing and its enable setting.
 
 It names Android after the host as well. `ro.product.model` is the host's
-device-tree model, or `Droidloom` without one. `ro.droidloom.device_name` is
+device-tree model, or `Droidloom` without one. When the model's first word is
+the vendor of the device tree's first compatible (`oneplus,iceland` for
+"OnePlus Pad 4"), that word becomes `ro.product.manufacturer` and
+`ro.product.brand`. `ro.droidloom.device_name` is
 the host's pretty hostname from `/etc/machine-info`, else its hostname, and
 system_server writes it to `Settings.Global.DEVICE_NAME` at every start.
 
