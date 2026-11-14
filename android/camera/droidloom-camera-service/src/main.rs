@@ -128,15 +128,23 @@ fn ask_broker(message: &Message) -> Option<(Message, Vec<OwnedFd>)> {
     Some((reply, record.descriptors))
 }
 
-/// braun's cameras: the first back camera, then the first front one, then
-/// the rest, so that cameras 0 and 1 are where apps expect them.
+/// braun's cameras: the main back camera, then the first front one, then
+/// the rest, so that cameras 0 and 1 are where apps expect them. The main
+/// back camera is the one at 1x zoom, else one that focuses, else the first:
+/// braun may list an ultrawide before it.
 fn list_cameras() -> Vec<Camera> {
     let Some((Message::Cameras(mut cameras), _)) = ask_broker(&Message::CameraList) else {
         return Vec::new();
     };
     let mut ordered = Vec::with_capacity(cameras.len());
     for facing in [Facing::Back, Facing::Front] {
-        if let Some(index) = cameras.iter().position(|camera| camera.facing == facing) {
+        let of_facing = |camera: &Camera| camera.facing == facing;
+        let index = cameras
+            .iter()
+            .position(|camera| of_facing(camera) && camera.zoom == 1.0)
+            .or_else(|| cameras.iter().position(|camera| of_facing(camera) && camera.lens))
+            .or_else(|| cameras.iter().position(of_facing));
+        if let Some(index) = index {
             ordered.push(cameras.remove(index));
         }
     }
@@ -238,6 +246,25 @@ impl Buffer {
             .collect::<io::Result<Vec<_>>>()?;
         let layout = parse_minigbm_handle(fds.len(), &handle.ints).ok();
         Ok(Self { fds, layout })
+    }
+
+    /// Writes the bytes of the whole buffer through `write`, between dma-buf
+    /// syncs, without its picture layout: a JPEG's BLOB buffer is bytes, and
+    /// its handle need not parse as a picture's.
+    fn write_bytes(&self, write: impl FnOnce(&mut [u8]) -> bool) -> bool {
+        let Some(fd) = self.fds.first() else {
+            return false;
+        };
+        let Ok(length) = descriptor_size(fd.as_fd()) else {
+            return false;
+        };
+        let Ok(mut mapping) = Mapping::new(fd.as_fd(), length, true) else {
+            return false;
+        };
+        dma_buf_sync(fd.as_fd(), DMA_BUF_SYNC_WRITE);
+        let written = write(mapping.bytes_mut());
+        dma_buf_sync(fd.as_fd(), DMA_BUF_SYNC_WRITE | DMA_BUF_SYNC_END);
+        written
     }
 
     /// Writes into the whole buffer through `write`, between dma-buf syncs.
@@ -713,7 +740,7 @@ impl Worker {
                 .and_then(|jpeg| exif::with_orientation(&jpeg, photo.orientation))
                 .is_some_and(|jpeg| {
                     photo.output.buffer.as_ref().is_some_and(|buffer| {
-                        buffer.write(|memory, _| write_blob(memory, &jpeg, photo.buffer_size))
+                        buffer.write_bytes(|memory| write_blob(memory, &jpeg, photo.buffer_size))
                     })
                 });
         if !written {
