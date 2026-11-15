@@ -1,0 +1,21 @@
+--- a/v4l2/V4L2Decoder.cpp
++++ b/v4l2/V4L2Decoder.cpp
+@@ -573,10 +573,14 @@
+ 
+     mInputQueue->streamoff();
+ 
+-    // Streamon both V4L2 queues.
+-    mInputQueue->streamon();
+-    if (isOutputStreaming) {
+-        mOutputQueue->streamon();
++    // Streamon both V4L2 queues. The driver refuses (EBUSY) once its session
++    // has failed, e.g. a stop the firmware did not acknowledge in time. Report
++    // it: going back to Idle would leave the client waiting on a dead session
++    // until its own watchdog fires, and it would reuse that session again.
++    if (!mInputQueue->streamon() || (isOutputStreaming && !mOutputQueue->streamon())) {
++        ALOGE("Failed to streamon after flush.");
++        onError();
++        return;
+     }
+ 
+     // If there is no free buffer at mOutputQueue, tryFetchVideoFrame() should be triggerred after

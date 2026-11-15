@@ -1,0 +1,101 @@
+diff --git a/v4l2/V4L2Decoder.cpp b/v4l2/V4L2Decoder.cpp
+index 16fd9b2..56ab02c 100644
+--- a/v4l2/V4L2Decoder.cpp
++++ b/v4l2/V4L2Decoder.cpp
+@@ -654,6 +654,10 @@ void V4L2Decoder::serviceDeviceTask(bool event) {
+     }
+ 
+     bool outputDequeued = false;
++    // A failed driver session hands every queued capture buffer straight back
++    // empty, and recycling it at once below would loop here forever.
++    size_t emptyRecycled = 0;
++    const size_t emptyRecycleLimit = 2 * mOutputQueue->allocatedBuffersCount() + 2;
+     while (mOutputQueue->queuedBuffersCount() > 0) {
+         bool success;
+         V4L2ReadableBufferRef dequeuedBuffer;
+@@ -694,6 +698,11 @@ void V4L2Decoder::serviceDeviceTask(bool event) {
+         } else {
+             // Workaround(b/168750131): If the buffer is not enqueued before the next drain is done,
+             // then the driver will fail to notify EOS. So we recycle the buffer immediately.
++            if (++emptyRecycled > emptyRecycleLimit) {
++                ALOGE("Output queue keeps returning empty buffers, the session failed.");
++                onError();
++                return;
++            }
+             ALOGV("Recycle empty buffer %zu back to V4L2 output queue.", bufferId);
+             dequeuedBuffer.reset();
+             auto outputBuffer = mOutputQueue->getFreeBuffer(bufferId);
+@@ -1021,6 +1030,9 @@ void V4L2Decoder::onError() {
+     ALOGV("%s()", __func__);
+     ALOG_ASSERT(mTaskRunner->RunsTasksInCurrentSequence());
+ 
++    // A failed driver session keeps reporting the same pending event or last
++    // buffer, so polling on would only spin and flood this sequence with tasks.
++    mDevice->stopPolling();
+     setState(State::Error);
+     mErrorCb.Run();
+ }
+diff --git a/v4l2/V4L2DevicePoller.cpp b/v4l2/V4L2DevicePoller.cpp
+index b4add7d..7764934 100644
+--- a/v4l2/V4L2DevicePoller.cpp
++++ b/v4l2/V4L2DevicePoller.cpp
+@@ -8,6 +8,9 @@
+ 
+ #include <v4l2_codec2/v4l2/V4L2DevicePoller.h>
+ 
++#include <unistd.h>
++
++#include <memory>
+ #include <string>
+ 
+ #include <base/bind.h>
+@@ -19,6 +22,19 @@
+ 
+ namespace android {
+ 
++namespace {
++
++// Runs a posted event callback and lets the poll thread post the next one.
++void runCoalescedEvent(std::shared_ptr<std::atomic_bool> posted,
++                       std::shared_ptr<std::atomic_bool> pendingEvent,
++                       V4L2DevicePoller::EventCallback callback, bool event) {
++    posted->store(false);
++    const bool anyEvent = pendingEvent->exchange(false) || event;
++    callback.Run(anyEvent);
++}
++
++}  // namespace
++
+ V4L2DevicePoller::V4L2DevicePoller(V4L2Device* const device, const std::string& threadName,
+                                    scoped_refptr<base::SequencedTaskRunner> taskRunner)
+       : mDevice(device),
+@@ -113,6 +129,12 @@ void V4L2DevicePoller::schedulePoll() {
+ void V4L2DevicePoller::devicePollTask() {
+     ALOG_ASSERT(mPollThread.task_runner()->RunsTasksInCurrentSequence());
+ 
++    // At most one event callback is queued on the client sequence. A device
++    // that keeps reporting the same condition (a failed session's pending
++    // event or last buffer) otherwise grows that queue without bound.
++    auto posted = std::make_shared<std::atomic_bool>(false);
++    auto pendingEvent = std::make_shared<std::atomic_bool>(false);
++
+     while (true) {
+         ALOGV("Waiting for poll to be scheduled.");
+ 
+@@ -145,7 +167,15 @@ void V4L2DevicePoller::devicePollTask() {
+         if (buffers_pending || event_pending) {
+             ALOGV("Poll returned, calling event callback. event_pending=%d buffers_pending=%d",
+                   event_pending, buffers_pending);
+-            mClientTaskTunner->PostTask(FROM_HERE, base::Bind(mEventCallback, event_pending));
++            if (!posted->exchange(true)) {
++                mClientTaskTunner->PostTask(
++                        FROM_HERE, base::BindOnce(&runCoalescedEvent, posted, pendingEvent,
++                                                  mEventCallback, event_pending));
++            } else {
++                if (event_pending) pendingEvent->store(true);
++                // The client has not run the last callback yet: do not spin.
++                usleep(2000);
++            }
+         }
+     }
+ }

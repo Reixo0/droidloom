@@ -204,6 +204,18 @@ const PATCHES: &[(&str, &str)] = &[
         "android/aosp-patches/0027-v4l2-codec2-stale-capture-buffer.patch",
     ),
     (
+        "external/v4l2_codec2",
+        "android/aosp-patches/0036-v4l2-codec2-flush-streamon-error.patch",
+    ),
+    (
+        "external/v4l2_codec2",
+        "android/aosp-patches/0037-v4l2-codec2-poll-without-queued-buffers.patch",
+    ),
+    (
+        "external/v4l2_codec2",
+        "android/aosp-patches/0038-v4l2-codec2-bounded-poll-events.patch",
+    ),
+    (
         "frameworks/av",
         "android/audio/0001-host-buffered-playback.patch",
     ),

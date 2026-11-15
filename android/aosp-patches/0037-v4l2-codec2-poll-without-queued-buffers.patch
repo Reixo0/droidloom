@@ -1,0 +1,21 @@
+--- a/v4l2/V4L2Device.cpp
++++ b/v4l2/V4L2Device.cpp
+@@ -1210,6 +1210,18 @@
+     }
+     *eventPending = (pollfd != -1 && pollfds[pollfd].revents & POLLPRI);
+     *buffersPending = (pollfd != -1 && pollfds[pollfd].revents & (POLLIN | POLLOUT));
++
++    // A mem2mem device reports POLLERR at once while neither queue has a buffer
++    // queued (or a queue is not streaming), so the poll thread would spin on a
++    // core. Wait for the interrupt fd instead, which queueing a buffer signals,
++    // with a short timeout so nothing else is missed for long.
++    if (pollfd != -1 && pollfds[pollfd].revents == POLLERR && !(pollfds[0].revents & POLLIN)) {
++        ALOGV("device has nothing queued, waiting for an interrupt");
++        if (HANDLE_EINTR(::poll(pollfds, 1, 10)) == -1) {
++            ALOGE("poll() failed");
++            return false;
++        }
++    }
+     return true;
+ }
+ 
