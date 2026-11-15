@@ -1,0 +1,211 @@
+Subject: [PATCH] Droidloom: video layers go to the host directly
+
+YouTube's video layer is NV12 in a BT.709 dataspace, so every frame of a
+playing video was composed by RenderEngine and then again by the host.
+With the presenter's COLOR_REPRESENTATION capability, NV12/NV21 layers in
+an SDR BT.601 or BT.709 dataspace are exported with their matrix and
+range in the layer flags (bits 8-15, wp_color_representation values).
+A video edge between logical pixels is widened to the next whole one,
+stretching the picture by at most a pixel, so letterboxed video on a 2x
+screen can be placed too.
+
+diff --git a/services/surfaceflinger/DroidloomLayers.cpp b/services/surfaceflinger/DroidloomLayers.cpp
+index df27324..1e3e605 100644
+--- a/services/surfaceflinger/DroidloomLayers.cpp
++++ b/services/surfaceflinger/DroidloomLayers.cpp
+@@ -378,6 +378,32 @@ bool onLogicalGrid(std::array<int32_t, 4> edges, std::array<uint32_t, 2> logical
+     return on(edges[0], logical[0], width) && on(edges[1], logical[1], height) &&
+             on(edges[2], logical[0], width) && on(edges[3], logical[1], height);
+ }
++// Widen a rectangle to the nearest whole logical pixels around it, where those
++// are whole physical pixels too and inside the task; otherwise leave it.
++void snapToLogicalGrid(Rect* r, std::array<uint32_t, 2> logical, uint32_t width,
++                       uint32_t height) {
++    const auto snap = [](int32_t edge, uint32_t units, uint32_t pixels, bool up,
++                         int32_t* out) {
++        if (!units || !pixels) return true;
++        const int64_t scaled = static_cast<int64_t>(edge) * units;
++        int64_t whole = scaled / pixels;
++        if (up && scaled % pixels) whole++;
++        const int64_t back = whole * pixels;
++        if (back % units) return false;
++        *out = static_cast<int32_t>(back / units);
++        return true;
++    };
++    Rect snapped = *r;
++    if (!snap(r->left, logical[0], width, false, &snapped.left) ||
++        !snap(r->top, logical[1], height, false, &snapped.top) ||
++        !snap(r->right, logical[0], width, true, &snapped.right) ||
++        !snap(r->bottom, logical[1], height, true, &snapped.bottom))
++        return;
++    if (snapped.left < 0 || snapped.top < 0 || snapped.right > static_cast<int32_t>(width) ||
++        snapped.bottom > static_cast<int32_t>(height))
++        return;
++    *r = snapped;
++}
+ // Exact ABI of the pinned minigbm mapper; never pass its metadata FD as an image plane.
+ struct CrosHandle : native_handle_t {
+     int32_t fds[5];
+@@ -403,10 +429,54 @@ const CrosHandle* handle(const sp<GraphicBuffer>& buffer) {
+         (c->usage & GRALLOC_USAGE_PROTECTED))
+         return nullptr;
+     // These SDR RGB formats have the same sampling interpretation on both sides.
+-    constexpr uint32_t ar = 0x34325241, xr = 0x34325258, ab = 0x34324241, xb = 0x34324258;
+-    if (c->format != ar && c->format != xr && c->format != ab && c->format != xb) return nullptr;
++    // NV12/NV21 video also does, once its matrix and range travel with it.
++    constexpr uint32_t ar = 0x34325241, xr = 0x34325258, ab = 0x34324241, xb = 0x34324258,
++                       nv12 = 0x3231564e, nv21 = 0x3132564e;
++    if (c->format != ar && c->format != xr && c->format != ab && c->format != xb &&
++        c->format != nv12 && c->format != nv21)
++        return nullptr;
+     return c;
+ }
++bool isYuv(uint32_t format) {
++    return format == 0x3231564e || format == 0x3132564e;
++}
++// Capability bit 8: layer flags carry wp_color_representation coefficients
++// (bits 8-11) and range (bits 12-15), so YUV video can be placed directly.
++constexpr uint32_t kColorRepresentation = 1u << 8;
++// wp_color_representation_surface_v1 coefficients and range for an SDR YUV
++// dataspace, or zero for one the host could not show the same way.
++uint32_t yuvRepresentation(ui::Dataspace dataspace) {
++    using D = ui::Dataspace;
++    const auto standard = static_cast<D>(static_cast<int32_t>(dataspace) &
++                                         static_cast<int32_t>(D::STANDARD_MASK));
++    const auto transfer = static_cast<D>(static_cast<int32_t>(dataspace) &
++                                         static_cast<int32_t>(D::TRANSFER_MASK));
++    const auto range = static_cast<D>(static_cast<int32_t>(dataspace) &
++                                      static_cast<int32_t>(D::RANGE_MASK));
++    // An unknown YUV dataspace is BT.601 limited range, as RenderEngine reads it.
++    if (dataspace == D::UNKNOWN) return 4 | 2 << 4;
++    if (transfer != D::TRANSFER_UNSPECIFIED && transfer != D::TRANSFER_SMPTE_170M &&
++        transfer != D::TRANSFER_SRGB && transfer != D::TRANSFER_GAMMA2_2)
++        return 0;
++    uint32_t coefficients;
++    switch (standard) {
++        case D::STANDARD_BT709:
++            coefficients = 2;
++            break;
++        case D::STANDARD_UNSPECIFIED:
++        case D::STANDARD_BT601_625:
++        case D::STANDARD_BT601_625_UNADJUSTED:
++        case D::STANDARD_BT601_525:
++        case D::STANDARD_BT601_525_UNADJUSTED:
++            coefficients = 4;
++            break;
++        default:
++            return 0;
++    }
++    if (range == D::RANGE_FULL) return coefficients | 1 << 4;
++    if (range == D::RANGE_LIMITED || range == D::RANGE_UNSPECIFIED) return coefficients | 2 << 4;
++    return 0;
++}
+ struct Export {
+     uint32_t id;
+     sp<GraphicBuffer> buffer;
+@@ -417,9 +487,11 @@ struct Export {
+     uint32_t transform, alpha, color;
+     bool opaque;
+     uint32_t format = 0;
++    // Color representation for YUV sources (coefficients | range << 4), else 0.
++    uint32_t representation = 0;
+ };
+ std::optional<Export> prepare(const compositionengine::OutputLayer& layer, uint32_t width,
+-                              uint32_t height) {
++                              uint32_t height, bool yuvLayers) {
+     const auto& o = layer.getState();
+     const auto& s = static_cast<const surfaceflinger::frontend::LayerSnapshot&>(
+         *layer.getLayerFE().getCompositionState());
+@@ -431,10 +503,10 @@ std::optional<Export> prepare(const compositionengine::OutputLayer& layer, uint3
+         s.isTextureSamplingBehind || !s.colorTransformIsIdentity || s.sidebandStream ||
+         s.hdrMetadata.validTypes || s.luts || o.appLuts || o.generatedLuts ||
+         o.overrideInfo.buffer || o.dimmingRatio != 1.0f || !std::isfinite(s.alpha) || s.alpha < 0 ||
+-        s.alpha > 1 ||
+-        (o.dataspace != ui::Dataspace::V0_SRGB && o.dataspace != ui::Dataspace::SRGB &&
+-         o.dataspace != ui::Dataspace::UNKNOWN))
++        s.alpha > 1)
+         return {};
++    const bool srgb = o.dataspace == ui::Dataspace::V0_SRGB || o.dataspace == ui::Dataspace::SRGB ||
++            o.dataspace == ui::Dataspace::UNKNOWN;
+     const auto r = o.displayFrame;
+     if (r.isEmpty() || r.left < 0 || r.top < 0 || r.right > static_cast<int32_t>(width) ||
+         r.bottom > static_cast<int32_t>(height))
+@@ -450,7 +522,7 @@ std::optional<Export> prepare(const compositionengine::OutputLayer& layer, uint3
+              .color = 0,
+              .opaque = s.isOpaque};
+     if (!e.buffer) {
+-        if (!s.fillsColor()) return {};
++        if (!srgb || !s.fillsColor()) return {};
+         auto channel = [](float v) {
+             return static_cast<uint32_t>(std::round(std::clamp(v, 0.0f, 1.0f) * 255));
+         };
+@@ -463,6 +535,14 @@ std::optional<Export> prepare(const compositionengine::OutputLayer& layer, uint3
+     if (!c || s.isFrontBuffered()) return {};
+     if (s.blendMode != hal::BlendMode::NONE && !s.premultipliedAlpha && !s.contentOpaque) return {};
+     e.format = c->format;
++    if (isYuv(e.format)) {
++        // Video keeps its own encoding; the host converts it with this matrix.
++        if (!yuvLayers) return {};
++        e.representation = yuvRepresentation(o.dataspace);
++        if (!e.representation) return {};
++    } else if (!srgb) {
++        return {};
++    }
+     // An opaque Android layer may contain arbitrary bits in its alpha channel.
+     // Import the same planes and modifier as XRGB/XBGR so sampling ignores
+     // those bits. Import rejection remains an ordinary composition fallback.
+@@ -666,18 +746,24 @@ bool DroidloomLayers::presentFrame(compositionengine::Output& output, uint32_t w
+             return false;
+         }
+     }
++    std::array<uint32_t, 4> config;
++    if (!configuration(mRequests.get(), mState->config, mSubscribed, width, height, &config)) return false;
++    const bool yuvLayers = (config[0] & kColorRepresentation) != 0;
++    const auto logical = mState->config.logicalSize();
+     std::vector<Export> exports;
+     std::set<uint64_t> buffers;
+     for (auto* layer : output.getOutputLayersOrderedByZ()) {
+         if (layer->getState().visibleRegion.isEmpty()) continue;
+-        auto e = prepare(*layer, width, height);
++        auto e = prepare(*layer, width, height, yuvLayers);
+         if (!e || exports.size() == kMaxLayers) return false;
+         if (e->buffer && !buffers.insert(e->buffer->getId()).second) return false;
++        // Scaled video rarely lands on whole logical pixels (a 1080p video
++        // letterboxed on a 2x screen starts on an odd row). Widening it to
++        // the next whole pixel at most stretches it by a pixel, invisibly.
++        if (e->representation) snapToLogicalGrid(&e->destination, logical, width, height);
+         exports.push_back(std::move(*e));
+     }
+     if (exports.empty() || mNextTicket > UINT64_MAX - exports.size()) return false;
+-    std::array<uint32_t, 4> config;
+-    if (!configuration(mRequests.get(), mState->config, mSubscribed, width, height, &config)) return false;
+     // A desktop frame does not imply new content in every Android task.
+     // Preserve unchanged attachments and reads; do not invalidate Flutter's
+     // scene or resend buffers merely because another application is animating.
+@@ -691,7 +777,8 @@ bool DroidloomLayers::presentFrame(compositionengine::Output& output, uint32_t w
+              static_cast<uint64_t>(e.destination.bottom), std::bit_cast<uint32_t>(e.source.left),
+              std::bit_cast<uint32_t>(e.source.top), std::bit_cast<uint32_t>(e.source.right),
+              std::bit_cast<uint32_t>(e.source.bottom), e.transform, e.alpha, e.color,
+-             static_cast<uint64_t>(e.opaque), e.format});
++             static_cast<uint64_t>(e.opaque),
++             e.format | static_cast<uint64_t>(e.representation) << 32});
+     }
+     const bool asyncImports = (config[0] & 32) != 0;
+     const auto retire = [&](uint64_t buffer) {
+@@ -728,7 +815,6 @@ bool DroidloomLayers::presentFrame(compositionengine::Output& output, uint32_t w
+     const bool settled = mSettle->settled(sceneShape(scene), systemTime(SYSTEM_TIME_MONOTONIC));
+     // Compose a scene the host cannot place without asking it: asking costs a
+     // frame while the answer travels.
+-    const auto logical = mState->config.logicalSize();
+     for (const auto& e : exports) {
+         const auto& d = e.destination;
+         if (!onLogicalGrid({d.left, d.top, d.right, d.bottom}, logical, width, height)) {
+@@ -850,7 +936,7 @@ bool DroidloomLayers::presentFrame(compositionengine::Output& output, uint32_t w
+             put32(p, static_cast<uint32_t>(std::round(v * 256)));
+         put32(p, e.transform);
+         put32(p, e.alpha);
+-        put32(p, e.opaque ? 1 : 0);
++        put32(p, (e.opaque ? 1 : 0) | e.representation << 8);
+         put32(p, e.color);
+         auto& fds = layerFds;
+         fds.clear();

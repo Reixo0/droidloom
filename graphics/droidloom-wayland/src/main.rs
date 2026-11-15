@@ -3370,6 +3370,8 @@ fn run() -> Result<(), PresenterError> {
             subcompositor: globals.bind(&qh, 1..=1, ())?,
             shm: globals.bind(&qh, 1..=1, ())?,
             alpha: globals.bind(&qh, 1..=1, ()).ok(),
+            color_representation: globals.bind(&qh, 1..=1, ()).ok(),
+            yuv_encodings: 0,
         },
         clipboard: clipboard::Clipboard::new(
             socket_path.with_file_name("clipboard.sock"),

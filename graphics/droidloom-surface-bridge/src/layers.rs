@@ -14,6 +14,11 @@ pub const MAX_IMPORTS: usize = 16;
 /// Requiring both bits makes older peers select normal composition fallback.
 pub const SUPPORTED: u32 =
     3 | ASYNC_STAGE | CONFIG_EVENTS | ASYNC_COMMIT | ASYNC_IMPORT | SCENE_BATCH | PLACEMENT_GRID;
+/// Layer flags may carry a YUV source's color representation (bits 8-15,
+/// see [`Layer::representation`]). Offered only where the host converts
+/// every SDR BT.601/BT.709 matrix and range; senders keep video composed
+/// without it.
+pub const COLOR_REPRESENTATION: u32 = 1 << 8;
 /// Bounded chunks; the final chunk and commit share one packet.
 pub const SCENE_BATCH: u32 = 1 << 6;
 /// Maximum layers in one scene chunk; the transport still permits only four FDs.
@@ -123,6 +128,10 @@ pub struct Layer {
     pub opaque: bool,
     /// Premultiplied ARGB value for a solid layer.
     pub color: u32,
+    /// Zero for RGB sources. For YUV sources, the
+    /// `wp_color_representation_surface_v1` coefficients in bits 0-3 and
+    /// range in bits 4-7.
+    pub representation: u32,
 }
 
 impl Layer {
@@ -267,10 +276,17 @@ fn decode_layer(p: &[u8], fenced: bool) -> Result<Layer, WireError> {
         ],
         transform: read_u32(p, 56)?,
         alpha: read_u32(p, 60)?,
-        opaque: flags == 1,
+        opaque: flags & 1 != 0,
         color: read_u32(p, 68)?,
+        representation: flags >> 8,
     };
-    if flags > 1 || (layer.buffer == 0 && fenced) {
+    let coefficients = layer.representation & 15;
+    let range = layer.representation >> 4;
+    if flags & !0xff01 != 0
+        || (layer.representation != 0
+            && (layer.buffer == 0 || !(1..=8).contains(&coefficients) || !(1..=2).contains(&range)))
+        || (layer.buffer == 0 && fenced)
+    {
         return Err(WireError::Field);
     }
     Ok(layer)
@@ -969,6 +985,36 @@ mod tests {
             alpha: u32::MAX,
             opaque: true,
             color: 0,
+            representation: 0,
+        }
+    }
+    fn layer_record(buffer: u64, flags: u32) -> Vec<u8> {
+        let mut p = Vec::new();
+        for v in [2u64, buffer, 9] {
+            p.extend_from_slice(&v.to_le_bytes());
+        }
+        for v in [0u32, 0, 800, 600, 0, 0, 800 * 256, 600 * 256, 0, u32::MAX, flags, 0] {
+            p.extend_from_slice(&v.to_le_bytes());
+        }
+        p
+    }
+    #[test]
+    fn video_layers_carry_their_matrix_and_range() {
+        // BT.709 limited range, opaque.
+        let l = decode_layer(&layer_record(8, 1 | (2 | 2 << 4) << 8), false).unwrap();
+        assert!(l.opaque);
+        assert_eq!(l.representation, 2 | 2 << 4);
+        assert_eq!(decode_layer(&layer_record(8, 1), false).unwrap().representation, 0);
+        // Solid colors have no matrix; unknown matrices, ranges and bits fail.
+        for (buffer, flags) in [
+            (0, (2 | 2 << 4) << 8),
+            (8, (9 | 1 << 4) << 8),
+            (8, (2 | 3 << 4) << 8),
+            (8, 2 << 8),
+            (8, 1 << 16),
+            (8, 2),
+        ] {
+            assert!(decode_layer(&layer_record(buffer, flags), false).is_err());
         }
     }
     #[test]

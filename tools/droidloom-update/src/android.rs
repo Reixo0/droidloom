@@ -357,6 +357,26 @@ const PATCHES: &[(&str, &str)] = &[
     ),
     (
         "frameworks/native",
+        "android/surfaceflinger/0031-droidloom-direct-video-layers.patch",
+    ),
+    (
+        "frameworks/native",
+        "android/surfaceflinger/0032-droidloom-video-import-pool.patch",
+    ),
+    (
+        "frameworks/native",
+        "android/surfaceflinger/0033-droidloom-retry-failed-imports.patch",
+    ),
+    (
+        "frameworks/native",
+        "android/surfaceflinger/0034-droidloom-video-imports-without-size.patch",
+    ),
+    (
+        "frameworks/native",
+        "android/surfaceflinger/0035-droidloom-both-buffer-views.patch",
+    ),
+    (
+        "frameworks/native",
         "android/inputflinger/0001-application-token-targeted-injection.patch",
     ),
     (

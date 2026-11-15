@@ -79,6 +79,7 @@ impl Wire {
             role,
             viewport,
             alpha,
+            representation: None,
             sync: None,
             content: None,
             solid: None,
@@ -142,6 +143,7 @@ fn geometry() -> Geometry {
         transform: 0,
         alpha: u32::MAX,
         opaque: true,
+        representation: 0,
     }
 }
 

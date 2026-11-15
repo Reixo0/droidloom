@@ -1,0 +1,49 @@
+Subject: [PATCH] Droidloom: retry a failed host import when its buffer returns
+
+A failed import stayed in the cache as a failure until eviction. Since
+video layers keep their whole pool imported, a buffer whose import
+failed once was never retried, and every pass of the decoder's rotation
+through it composed a frame, hiding the direct video each time. An idle
+failed import is now dropped, so the buffer is imported again when the
+producer next uses it. Failures are logged (at most 32).
+
+diff --git a/services/surfaceflinger/DroidloomLayers.cpp b/services/surfaceflinger/DroidloomLayers.cpp
+index 1e3e605..8544cd1 100644
+--- a/services/surfaceflinger/DroidloomLayers.cpp
++++ b/services/surfaceflinger/DroidloomLayers.cpp
+@@ -19,6 +19,7 @@
+ #include <array>
+ #include <atomic>
+ #include <bit>
++#include <cinttypes>
+ #include <cmath>
+ #include <condition_variable>
+ #include <cstring>
+@@ -810,6 +811,27 @@ bool DroidloomLayers::presentFrame(compositionengine::Output& output, uint32_t w
+         currentImports.emplace(e.buffer->getId(), DroidloomImportUse{
+                 e.id, h->width, h->height, e.format, h->totalSize, mCacheSerial});
+     }
++    // A failed import holds nothing on the host. Kept as a spare it would
++    // fail every scene that uses its buffer again, which for a video's
++    // rotating pool is a composed frame each cycle: retry it on return.
++    for (auto it = mBuffers.begin(); it != mBuffers.end();) {
++        bool failed;
++        {
++            std::lock_guard lock(mState->mutex);
++            failed = !currentImports.contains(it->first) &&
++                    mState->imports.status(it->first) == ImportQueue::Status::Failed &&
++                    mState->imports.forget(it->first);
++        }
++        if (!failed) {
++            ++it;
++            continue;
++        }
++        static std::atomic<uint32_t> logged{0};
++        if (logged.fetch_add(1, std::memory_order_relaxed) < 32)
++            ALOGW("Droidloom: host import of buffer %" PRIu64 " (format %#x) failed; retrying",
++                  it->first, it->second.format);
++        it = mBuffers.erase(it);
++    }
+     mRetireOnRelease = trimDroidloomImports(mBuffers, currentImports, retire);
+     // Composed frames count toward settling too.
+     const bool settled = mSettle->settled(sceneShape(scene), systemTime(SYSTEM_TIME_MONOTONIC));

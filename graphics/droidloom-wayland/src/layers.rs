@@ -9,6 +9,10 @@ use wayland_client::protocol::{wl_shm, wl_shm_pool, wl_subcompositor, wl_subsurf
 use wayland_protocols::wp::alpha_modifier::v1::client::{
     wp_alpha_modifier_surface_v1::WpAlphaModifierSurfaceV1, wp_alpha_modifier_v1::WpAlphaModifierV1,
 };
+use wayland_protocols::wp::color_representation::v1::client::{
+    wp_color_representation_manager_v1::{self, WpColorRepresentationManagerV1},
+    wp_color_representation_surface_v1::{self, WpColorRepresentationSurfaceV1},
+};
 
 fn stage_batch(stream: &mut Stream, layers: Vec<wire::BatchLayer>, fds: Vec<OwnedFd>) {
     let mut descriptors: [Option<OwnedFd>; 4] = [const { None }; 4];
@@ -27,6 +31,21 @@ pub(super) struct Globals {
     pub subcompositor: wl_subcompositor::WlSubcompositor,
     pub shm: wl_shm::WlShm,
     pub alpha: Option<WpAlphaModifierV1>,
+    pub color_representation: Option<WpColorRepresentationManagerV1>,
+    /// SDR video encodings the host announced it converts, as
+    /// `YUV_ENCODINGS` bits.
+    pub yuv_encodings: u8,
+}
+
+/// BT.709 and BT.601, each in full and limited range: what SurfaceFlinger
+/// sends with `COLOR_REPRESENTATION`.
+const YUV_ENCODINGS: [(u32, u32); 4] = [(2, 1), (2, 2), (4, 1), (4, 2)];
+
+impl Globals {
+    fn yuv_layers(&self) -> bool {
+        self.color_representation.is_some()
+            && self.yuv_encodings == (1 << YUV_ENCODINGS.len()) - 1
+    }
 }
 struct Source {
     metadata: Buffer,
@@ -88,6 +107,8 @@ struct View {
     role: wl_subsurface::WlSubsurface,
     viewport: WpViewport,
     alpha: WpAlphaModifierSurfaceV1,
+    /// Present while the view shows a YUV source.
+    representation: Option<WpColorRepresentationSurfaceV1>,
     sync: Option<WpLinuxDrmSyncobjSurfaceV1>,
     content: Option<Content>,
     solid: Option<(u32, wl_buffer::WlBuffer)>,
@@ -158,6 +179,10 @@ impl View {
             self.role.set_position(0, 0);
             self.surface.set_opaque_region(None);
             self.geometry = None;
+            // The transparent pixel is RGB: a YUV matrix would be refused.
+            if let Some(representation) = self.representation.take() {
+                representation.destroy();
+            }
             self.surface.attach(Some(clear), 0, 0);
             self.surface.damage_buffer(0, 0, i32::MAX, i32::MAX);
             self.surface.commit();
@@ -212,6 +237,7 @@ struct Geometry {
     transform: u32,
     alpha: u32,
     opaque: bool,
+    representation: u32,
 }
 
 impl Geometry {
@@ -239,6 +265,7 @@ impl Geometry {
             transform: l.transform,
             alpha: l.alpha,
             opaque: l.opaque && l.alpha == u32::MAX,
+            representation: l.representation,
         }
     }
 }
@@ -247,6 +274,9 @@ impl Drop for View {
         self.timeline = None;
         if let Some(sync) = self.sync.take() {
             sync.destroy();
+        }
+        if let Some(representation) = self.representation.take() {
+            representation.destroy();
         }
         self.alpha.destroy();
         self.viewport.destroy();
@@ -620,11 +650,16 @@ impl App {
         let task = self.tasks.get(&object)?;
         let enabled =
             self.layer_globals.alpha.is_some() && task.accepts_present() && !task.suspended;
+        let yuv = if self.layer_globals.yuv_layers() {
+            wire::COLOR_REPRESENTATION
+        } else {
+            0
+        };
         // The grid submit_layer_scene checks edges against.
         let (logical_width, logical_height) = task.logical_size.unwrap_or_default();
         Some([
             if enabled {
-                wire::SUPPORTED
+                wire::SUPPORTED | yuv
             } else {
                 wire::CONFIG_EVENTS
             },
@@ -1281,6 +1316,7 @@ impl App {
                     role,
                     viewport,
                     alpha,
+                    representation: None,
                     sync,
                     content: None,
                     solid: None,
@@ -1323,6 +1359,31 @@ impl App {
                     v.role.set_position(dx, dy);
                     v.viewport.set_destination(dw, dh);
                     v.alpha.set_multiplier(geometry.alpha);
+                    // A YUV source carries its matrix and range; destroying
+                    // the object returns the view to RGB with its next commit.
+                    if geometry.representation == 0 {
+                        if let Some(representation) = v.representation.take() {
+                            representation.destroy();
+                        }
+                    } else {
+                        let manager = self
+                            .layer_globals
+                            .color_representation
+                            .as_ref()
+                            .ok_or(PresenterError::Configuration("layer color representation"))?;
+                        let representation = v
+                            .representation
+                            .get_or_insert_with(|| manager.get_surface(&v.surface, qh, ()));
+                        let coefficients = wp_color_representation_surface_v1::Coefficients::try_from(
+                            geometry.representation & 15,
+                        )
+                        .map_err(|_| PresenterError::Configuration("layer coefficients"))?;
+                        let range = wp_color_representation_surface_v1::Range::try_from(
+                            geometry.representation >> 4,
+                        )
+                        .map_err(|_| PresenterError::Configuration("layer range"))?;
+                        representation.set_coefficients_and_range(coefficients, range);
+                    }
                     if geometry.opaque {
                         let r = Region::new(&self.compositor)?;
                         r.add(0, 0, dw, dh);
@@ -1566,6 +1627,29 @@ wayland_client::delegate_noop!(App: ignore wl_shm_pool::WlShmPool);
 wayland_client::delegate_noop!(App: ignore wl_buffer::WlBuffer);
 wayland_client::delegate_noop!(App: ignore WpAlphaModifierV1);
 wayland_client::delegate_noop!(App: ignore WpAlphaModifierSurfaceV1);
+wayland_client::delegate_noop!(App: ignore WpColorRepresentationSurfaceV1);
+
+impl Dispatch<WpColorRepresentationManagerV1, ()> for App {
+    fn event(
+        app: &mut Self,
+        _manager: &WpColorRepresentationManagerV1,
+        event: wp_color_representation_manager_v1::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        if let wp_color_representation_manager_v1::Event::SupportedCoefficientsAndRanges {
+            coefficients: WEnum::Value(coefficients),
+            range: WEnum::Value(range),
+        } = event
+            && let Some(index) = YUV_ENCODINGS
+                .iter()
+                .position(|pair| *pair == (coefficients as u32, range as u32))
+        {
+            app.layer_globals.yuv_encodings |= 1 << index;
+        }
+    }
+}
 
 #[cfg(test)]
 #[path = "layer_updates_test.rs"]
@@ -1586,6 +1670,7 @@ mod tests {
             alpha: u32::MAX,
             opaque: true,
             color: 0,
+            representation: 0,
         }
     }
 

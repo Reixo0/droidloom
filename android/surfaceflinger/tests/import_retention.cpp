@@ -108,11 +108,60 @@ void newestCompatibleSpares() {
     auto wrongFormat = use(1, 1920, MiB, 12); wrongFormat.format = 2;
     cache.try_emplace(12, wrongFormat);
     assert(!trimDroidloomImports(cache, Scene{{1, use()}}, [](uint64_t) { return true; }));
-    assert(cache.size() == 4);
-    for (uint64_t id : {1, 6, 7, 8}) assert(cache.contains(id));
+    assert(cache.size() == 7);
+    for (uint64_t id : {1, 3, 4, 5, 6, 7, 8}) assert(cache.contains(id));
+}
+
+void opaqueAndBlendedViews() {
+    // Three buffers, each imported as ARGB and XRGB as the layer switches.
+    Cache cache;
+    size_t retirements = 0;
+    auto retire = [&](uint64_t) { ++retirements; return true; };
+    for (uint64_t frame = 1; frame <= 600; ++frame) {
+        const bool opaque = frame % 2;
+        const uint64_t id = (frame % 3 + 1) | (opaque ? 1ull << 63 : 0);
+        auto u = use(1, 1216, 13 * MiB, frame);
+        u.format = opaque ? 0x34325258 : 0x34325241;
+        cache.try_emplace(id, u);
+        assert(!trimDroidloomImports(cache, Scene{{id, u}}, retire));
+    }
+    assert(cache.size() == 6 && retirements == 0);
+}
+
+void videoPoolStaysImported() {
+    // YouTube's 1080p decoder cycles 20 NV12 buffers of 3.2 MiB.
+    Cache cache;
+    size_t retirements = 0;
+    auto retire = [&](uint64_t) { ++retirements; return true; };
+    for (uint64_t frame = 1; frame <= 2000; ++frame) {
+        const uint64_t id = frame % 20 + 1;
+        auto u = use(1, 1152, 3 * MiB, frame);
+        u.format = 0x3231564e;
+        cache.try_emplace(id, u);
+        assert(!trimDroidloomImports(cache, Scene{{id, u}}, retire));
+    }
+    assert(cache.size() == 20 && retirements == 0);
+    // An RGB layer beside it keeps its own spares (up to six).
+    for (uint64_t id = 100; id <= 107; ++id) cache.try_emplace(id, use(2, 1920, MiB, id));
+    auto video = cache.at(1).use;
+    assert(!trimDroidloomImports(cache, Scene{{1, video}, {107, use(2, 1920, MiB, 107)}},
+                                 [](uint64_t) { return true; }));
+    assert(cache.size() == 20 + 7);
+    // A mapper that reports no size still keeps the video pool.
+    Cache unsized;
+    for (uint64_t frame = 1; frame <= 200; ++frame) {
+        const uint64_t id = frame % 20 + 1;
+        auto u = use(1, 1920, 0, frame);
+        u.format = 0x3231564e;
+        unsized.try_emplace(id, u);
+        assert(!trimDroidloomImports(unsized, Scene{{id, u}}, [](uint64_t) { return true; }));
+    }
+    assert(unsized.size() == 20);
 }
 
 int main() {
+    opaqueAndBlendedViews();
+    videoPoolStaysImported();
     resizeAndRelease();
     rotatingPoolStaysImported();
     pressureAndOwnership();

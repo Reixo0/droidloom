@@ -1,0 +1,165 @@
+Subject: [PATCH] Droidloom: keep a buffer's opaque and blended views both imported
+
+An opaque layer's ARGB buffer is imported as XRGB so its alpha bits are
+ignored. When a producer switched a buffer between opaque and blended,
+the old view was retired and the buffer imported again; YouTube's
+window above a playing video does this on almost every frame, so one
+of its buffers was always being imported and the scene was composed
+every other frame. Each view now has its own import identity (bit 63
+marks the opaque view), both stay cached as spares of one another, and
+a layer keeps up to six spare views. Releases still name the buffer.
+
+diff --git a/services/surfaceflinger/DroidloomImportRetention.h b/services/surfaceflinger/DroidloomImportRetention.h
+index a951579..4468919 100644
+--- a/services/surfaceflinger/DroidloomImportRetention.h
++++ b/services/surfaceflinger/DroidloomImportRetention.h
+@@ -15,9 +15,14 @@ struct DroidloomImportUse {
+     // buffers; any one missing from the host makes that frame composed.
+     bool video() const { return format == 0x3231564e || format == 0x3132564e; }
+ 
++    // The opaque (X) and blended (A) views of one producer format.
++    static uint32_t withAlpha(uint32_t f) {
++        return f == 0x34325258 ? 0x34325241 : f == 0x34324258 ? 0x34324241 : f;
++    }
++
+     bool compatible(const DroidloomImportUse& other) const {
+         return layer == other.layer && width == other.width && height == other.height &&
+-                format == other.format;
++                withAlpha(format) == withAlpha(other.format);
+     }
+ };
+ 
+@@ -29,7 +34,9 @@ template <typename Cache, typename Retire>
+ bool trimDroidloomImports(Cache& cache,
+                          const std::map<uint64_t, DroidloomImportUse>& current,
+                          Retire retire) {
+-    constexpr std::size_t kSpareCount = 12, kSparesPerLayer = 3;
++    // A layer that switches between opaque and blended keeps both views of
++    // its buffers: three buffers, six views.
++    constexpr std::size_t kSpareCount = 12, kSparesPerLayer = 6;
+     constexpr uint64_t kSpareBytes = 96ull * 1024 * 1024;
+     // Video spares are the decoder's own pool, alive while it plays anyway.
+     constexpr std::size_t kVideoSpares = 31;
+diff --git a/services/surfaceflinger/DroidloomLayers.cpp b/services/surfaceflinger/DroidloomLayers.cpp
+index 13fb7a2..75eb3b0 100644
+--- a/services/surfaceflinger/DroidloomLayers.cpp
++++ b/services/surfaceflinger/DroidloomLayers.cpp
+@@ -490,6 +490,10 @@ struct Export {
+     uint32_t format = 0;
+     // Color representation for YUV sources (coefficients | range << 4), else 0.
+     uint32_t representation = 0;
++    // Host import identity: the buffer ID, with bit 63 for its opaque view.
++    // A producer can switch a buffer between opaque and blended from frame
++    // to frame; each view stays imported instead of being replaced.
++    uint64_t import = 0;
+ };
+ std::optional<Export> prepare(const compositionengine::OutputLayer& layer, uint32_t width,
+                               uint32_t height, bool yuvLayers) {
+@@ -547,9 +551,11 @@ std::optional<Export> prepare(const compositionengine::OutputLayer& layer, uint3
+     // An opaque Android layer may contain arbitrary bits in its alpha channel.
+     // Import the same planes and modifier as XRGB/XBGR so sampling ignores
+     // those bits. Import rejection remains an ordinary composition fallback.
++    e.import = e.buffer->getId();
+     if (s.blendMode == hal::BlendMode::NONE) {
+         if (e.format == 0x34325241) e.format = 0x34325258;
+         if (e.format == 0x34324241) e.format = 0x34324258;
++        if (e.format != c->format) e.import ^= 1ull << 63;
+     }
+     const uint32_t flags = static_cast<uint32_t>(o.bufferTransform);
+     if (flags > 7) return {};
+@@ -752,12 +758,13 @@ bool DroidloomLayers::presentFrame(compositionengine::Output& output, uint32_t w
+     const bool yuvLayers = (config[0] & kColorRepresentation) != 0;
+     const auto logical = mState->config.logicalSize();
+     std::vector<Export> exports;
+-    std::set<uint64_t> buffers;
++    std::set<uint64_t> buffers, sources;
+     for (auto* layer : output.getOutputLayersOrderedByZ()) {
+         if (layer->getState().visibleRegion.isEmpty()) continue;
+         auto e = prepare(*layer, width, height, yuvLayers);
+         if (!e || exports.size() == kMaxLayers) return false;
+-        if (e->buffer && !buffers.insert(e->buffer->getId()).second) return false;
++        if (e->buffer && !sources.insert(e->buffer->getId()).second) return false;
++        if (e->buffer) buffers.insert(e->import);
+         // Scaled video rarely lands on whole logical pixels (a 1080p video
+         // letterboxed on a 2x screen starts on an odd row). Widening it to
+         // the next whole pixel at most stretches it by a pixel, invisibly.
+@@ -772,7 +779,7 @@ bool DroidloomLayers::presentFrame(compositionengine::Output& output, uint32_t w
+     for (const auto& e : exports) {
+         scene.insert(
+             scene.end(),
+-            {e.id, e.buffer ? e.buffer->getId() : 0, e.frame,
++            {e.id, e.import, e.frame,
+              static_cast<uint64_t>(e.destination.left), static_cast<uint64_t>(e.destination.top),
+              static_cast<uint64_t>(e.destination.right),
+              static_cast<uint64_t>(e.destination.bottom), std::bit_cast<uint32_t>(e.source.left),
+@@ -808,7 +815,7 @@ bool DroidloomLayers::presentFrame(compositionengine::Output& output, uint32_t w
+         if (!e.buffer) continue;
+         const auto* h = handle(e.buffer);
+         if (!h) return false;
+-        currentImports.emplace(e.buffer->getId(), DroidloomImportUse{
++        currentImports.emplace(e.import, DroidloomImportUse{
+                 e.id, h->width, h->height, e.format, h->totalSize, mCacheSerial});
+         static std::atomic<bool> sizeLogged{false};
+         if (isYuv(e.format) && !sizeLogged.exchange(true))
+@@ -860,20 +867,20 @@ bool DroidloomLayers::presentFrame(compositionengine::Output& output, uint32_t w
+ 
+     for (const auto& e : exports) {
+         if (!e.buffer) continue;
+-        auto cached = mBuffers.find(e.buffer->getId());
++        auto cached = mBuffers.find(e.import);
+         if (cached != mBuffers.end()) {
+             if (cached->second.format == e.format) continue;
+             // A producer can change the blend mode without reallocating.
+             // Retire the old interpretation only after its host read ends;
+             // a busy import selects fallback, which detaches that old view.
+-            if (!retire(e.buffer->getId())) return false;
++            if (!retire(e.import)) return false;
+             mBuffers.erase(cached);
+         }
+         if (mBuffers.size() == kMaxBuffers) return false;
+         const auto* h = handle(e.buffer);
+         if (!h) return false;
+         std::vector<uint8_t> p;
+-        put64(p, e.buffer->getId());
++        put64(p, e.import);
+         put32(p, h->width);
+         put32(p, h->height);
+         put32(p, e.format);
+@@ -891,7 +898,7 @@ bool DroidloomLayers::presentFrame(compositionengine::Output& output, uint32_t w
+         if (asyncImports) {
+             std::lock_guard lock(mState->mutex);
+             if (!mState->live) return false;
+-            attempt = mState->imports.begin(e.buffer->getId());
++            attempt = mState->imports.begin(e.import);
+             if (!attempt) continue; // Full batch; completion schedules the next.
+         }
+         if (!importBuffer(mRequests.get(), attempt, p, fds)) {
+@@ -903,8 +910,7 @@ bool DroidloomLayers::presentFrame(compositionengine::Output& output, uint32_t w
+             return false;
+         }
+         if (attempt == 1) ALOGI("Droidloom asynchronous imports enabled (16 per task)");
+-        mBuffers.emplace(e.buffer->getId(),
+-                         Cached{e.buffer, e.format, currentImports.at(e.buffer->getId())});
++        mBuffers.emplace(e.import, Cached{e.buffer, e.format, currentImports.at(e.import)});
+     }
+     if (asyncImports) {
+         std::lock_guard lock(mState->mutex);
+@@ -932,7 +938,7 @@ bool DroidloomLayers::presentFrame(compositionengine::Output& output, uint32_t w
+     std::vector<int> layerFds;
+     layerFds.reserve(1);
+     for (const auto& e : exports) {
+-        const uint64_t buffer = e.buffer ? e.buffer->getId() : 0;
++        const uint64_t buffer = e.buffer ? e.import : 0;
+         uint64_t ticket = 0;
+         bool reuse = false;
+         if (buffer) {
+@@ -944,7 +950,8 @@ bool DroidloomLayers::presentFrame(compositionengine::Output& output, uint32_t w
+                 reuse = true;
+             } else {
+                 ticket = ++mNextTicket;
+-                auto r = reads.track({buffer, e.frame});
++                // Android releases the buffer itself, whichever view was read.
++                auto r = reads.track({e.buffer->getId(), e.frame});
+                 mState->pending.emplace(ticket, r);
+                 added.emplace_back(ticket, r);
+             }

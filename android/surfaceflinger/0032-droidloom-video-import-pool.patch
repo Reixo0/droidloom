@@ -1,0 +1,59 @@
+Subject: [PATCH] Droidloom: keep a playing video's whole buffer pool imported
+
+A video decoder cycles through its output pool, 20 NV12 buffers for
+YouTube at 1080p. With three spare imports per layer, nearly every
+frame named a buffer the host no longer had: that frame was composed
+while it was imported again, the next went direct, and the host hid
+and showed the video every frame. Video layers keep up to 31 spare
+imports within 256 MiB, apart from the RGB spares.
+
+diff --git a/services/surfaceflinger/DroidloomImportRetention.h b/services/surfaceflinger/DroidloomImportRetention.h
+index a4d9031..d1903cf 100644
+--- a/services/surfaceflinger/DroidloomImportRetention.h
++++ b/services/surfaceflinger/DroidloomImportRetention.h
+@@ -11,6 +11,10 @@ struct DroidloomImportUse {
+     uint32_t layer, width, height, format;
+     uint64_t bytes, serial;
+ 
++    // A video decoder cycles through its whole output pool, often 16-24
++    // buffers; any one missing from the host makes that frame composed.
++    bool video() const { return format == 0x3231564e || format == 0x3132564e; }
++
+     bool compatible(const DroidloomImportUse& other) const {
+         return layer == other.layer && width == other.width && height == other.height &&
+                 format == other.format;
+@@ -27,6 +31,9 @@ bool trimDroidloomImports(Cache& cache,
+                          Retire retire) {
+     constexpr std::size_t kSpareCount = 12, kSparesPerLayer = 3;
+     constexpr uint64_t kSpareBytes = 96ull * 1024 * 1024;
++    // Video spares are the decoder's own pool, alive while it plays anyway.
++    constexpr std::size_t kVideoSpares = 31;
++    constexpr uint64_t kVideoSpareBytes = 256ull * 1024 * 1024;
+     std::map<uint32_t, DroidloomImportUse> layers;
+     for (const auto& [id, use] : current) {
+         layers.insert_or_assign(use.layer, use);
+@@ -42,14 +49,21 @@ bool trimDroidloomImports(Cache& cache,
+         const auto sa = cache.at(a).use.serial, sb = cache.at(b).use.serial;
+         return sa != sb ? sa > sb : a > b;
+     });
+-    uint64_t retainedBytes = 0;
+-    std::size_t retainedCount = 0;
++    uint64_t retainedBytes = 0, videoBytes = 0;
++    std::size_t retainedCount = 0, videoCount = 0;
+     std::map<uint32_t, std::size_t> perLayer;
+     bool retry = false;
+     for (uint64_t id : idle) {
+         const auto& use = cache.at(id).use;
+         auto layer = layers.find(use.layer);
+-        if (layer != layers.end() && use.compatible(layer->second) &&
++        if (layer != layers.end() && use.compatible(layer->second) && use.video() &&
++            videoCount < kVideoSpares && use.bytes != 0 &&
++            use.bytes <= kVideoSpareBytes - videoBytes) {
++            ++videoCount;
++            videoBytes += use.bytes;
++            continue;
++        }
++        if (layer != layers.end() && use.compatible(layer->second) && !use.video() &&
+             retainedCount < kSpareCount && perLayer[use.layer] < kSparesPerLayer &&
+             use.bytes != 0 && use.bytes <= kSpareBytes - retainedBytes) {
+             ++retainedCount;
