@@ -1,0 +1,110 @@
+Subject: [PATCH] Droidloom: hold the previous video frame while a new one imports
+
+A new video, or a resolution change, brings a new set of decoder buffers.
+Each is new to the host for its first cycle, and a scene with a pending
+import was composed. Every new frame was composed and then repainted
+directly once its import landed, so direct and composed presentation
+alternated for about a second (seen as skipped frames).
+
+While a video layer's buffer imports, the layer keeps its previous frame
+directly, provided that frame's host read is still open. The import
+completion recomposes at once, so the frame shows a few ms late instead.
+Failed imports and non-video layers still select composition.
+
+diff --git a/services/surfaceflinger/DroidloomLayers.cpp b/services/surfaceflinger/DroidloomLayers.cpp
+index 75eb3b0..c34be7e 100644
+--- a/services/surfaceflinger/DroidloomLayers.cpp
++++ b/services/surfaceflinger/DroidloomLayers.cpp
+@@ -584,6 +584,9 @@ struct DroidloomLayers::State {
+     ImportQueue imports;
+     ConfigCache config;
+     std::map<uint64_t, std::shared_ptr<Read>> pending;
++    // The last committed export of each video layer, by layer. Used only by
++    // the composition thread, so it needs no lock.
++    std::unordered_map<uint32_t, Export> lastVideo;
+     bool live = true;
+     bool retryOnRelease = false;
+     std::atomic<uint64_t> workRevision{1};
+@@ -775,6 +778,7 @@ bool DroidloomLayers::presentFrame(compositionengine::Output& output, uint32_t w
+     // A desktop frame does not imply new content in every Android task.
+     // Preserve unchanged attachments and reads; do not invalidate Flutter's
+     // scene or resend buffers merely because another application is animating.
++    const auto sceneOf = [&] {
+     std::vector<uint64_t> scene{config[1], width, height};
+     for (const auto& e : exports) {
+         scene.insert(
+@@ -788,6 +792,9 @@ bool DroidloomLayers::presentFrame(compositionengine::Output& output, uint32_t w
+              static_cast<uint64_t>(e.opaque),
+              e.format | static_cast<uint64_t>(e.representation) << 32});
+     }
++    return scene;
++    };
++    auto scene = sceneOf();
+     const bool asyncImports = (config[0] & 32) != 0;
+     const auto retire = [&](uint64_t buffer) {
+         {
+@@ -916,8 +923,47 @@ bool DroidloomLayers::presentFrame(compositionengine::Output& output, uint32_t w
+         std::lock_guard lock(mState->mutex);
+         // Pending and rejected imports select composed fallback. No new source
+         // read is tracked until every allocation in this scene is usable.
+-        if (!mState->live || !mState->imports.ready(buffers)) return false;
++        if (!mState->live) return false;
++        if (!mState->imports.ready(buffers)) {
++            // A new video brings a new set of decoder buffers, each new to the
++            // host for its first cycle. Composing those frames alternates
++            // direct and composed presentation for about a second, which shows
++            // as skipped frames. While a video frame imports, its layer keeps
++            // showing the previous frame directly: the import completion
++            // recomposes at once, so that frame arrives a few ms late instead.
++            if (mScene.empty()) return false;
++            for (auto& e : exports) {
++                const auto status = mState->imports.status(e.import);
++                if (status == ImportQueue::Status::Ready) continue;
++                // A failed or unqueued import composes, as any other layer.
++                if (!e.representation || status != ImportQueue::Status::Pending) return false;
++                const auto last = mState->lastVideo.find(e.id);
++                const auto old = mLayers.find(e.id);
++                // Hold only a frame whose host read is still open: its buffer
++                // has not gone back to the decoder.
++                if (last == mState->lastVideo.end() || old == mLayers.end() ||
++                    old->second.buffer != last->second.import ||
++                    old->second.frame != last->second.frame ||
++                    !mState->pending.contains(old->second.ticket) ||
++                    !mBuffers.contains(last->second.import) ||
++                    mState->imports.status(last->second.import) != ImportQueue::Status::Ready)
++                    return false;
++                e = last->second;
++            }
++            buffers.clear();
++            for (const auto& e : exports)
++                if (e.buffer) buffers.insert(e.import);
++            if (!mState->imports.ready(buffers)) return false;
++            scene = sceneOf();
++            if (scene == mScene) return true;
++        }
+     }
++    const auto rememberVideo = [&] {
++        auto& lastVideo = mState->lastVideo;
++        lastVideo.clear();
++        for (const auto& e : exports)
++            if (e.representation && e.buffer) lastVideo.insert_or_assign(e.id, e);
++    };
+     std::unordered_map<uint32_t, Last> next;
+     std::vector<std::pair<uint64_t, std::shared_ptr<Read>>> added;
+     auto reject = [&] {
+@@ -1002,6 +1048,7 @@ bool DroidloomLayers::presentFrame(compositionengine::Output& output, uint32_t w
+         if (id == 1 && batched) ALOGI("Droidloom scene batches enabled (16 layers / 4 fences per packet)");
+         mLayers = std::move(next);
+         mScene = std::move(scene);
++        rememberVideo();
+         return true;
+     }
+     // Distinguish an explicit rejection from a lost commit acknowledgement:
+@@ -1019,6 +1066,7 @@ bool DroidloomLayers::presentFrame(compositionengine::Output& output, uint32_t w
+     }
+     mLayers = std::move(next);
+     mScene = std::move(scene);
++    rememberVideo();
+     return true;
+ }
+ }  // namespace android

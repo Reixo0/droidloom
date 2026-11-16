@@ -216,6 +216,10 @@ const PATCHES: &[(&str, &str)] = &[
         "android/aosp-patches/0038-v4l2-codec2-bounded-poll-events.patch",
     ),
     (
+        "external/v4l2_codec2",
+        "android/aosp-patches/0039-v4l2-codec2-output-surface-switch.patch",
+    ),
+    (
         "frameworks/av",
         "android/audio/0001-host-buffered-playback.patch",
     ),
@@ -374,6 +378,10 @@ const PATCHES: &[(&str, &str)] = &[
     (
         "frameworks/native",
         "android/surfaceflinger/0035-droidloom-both-buffer-views.patch",
+    ),
+    (
+        "frameworks/native",
+        "android/surfaceflinger/0036-droidloom-hold-video-while-importing.patch",
     ),
     (
         "frameworks/native",

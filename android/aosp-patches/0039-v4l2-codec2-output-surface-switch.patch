@@ -1,0 +1,68 @@
+v4l2_codec2: keep decoding after the output surface is switched
+
+Apps that show video in a TextureView switch the decoder's output surface
+(MediaCodec.setOutputSurface) when the view moves, e.g. Reddit opening a
+post from the feed. The surface-backed block pool then hands out new
+buffers and the old ones never return. VideoFramePool dropped every buffer
+beyond the V4L2 buffer count and V4L2Decoder had no V4L2 buffer for a new
+block, so decoding stopped after a few frames: the player never became
+ready and the video kept loading.
+
+Surface-backed pools no longer drop unknown buffers (the surface bounds how
+many are out), and a new block takes any free V4L2 buffer, whose old block
+is forgotten.
+
+diff --git a/components/VideoFramePool.cpp b/components/VideoFramePool.cpp
+index d3fddb2..66e2bcd 100644
+--- a/components/VideoFramePool.cpp
++++ b/components/VideoFramePool.cpp
+@@ -151,7 +151,19 @@ bool VideoFramePool::shouldDropBuffer(uint32_t bufferId) {
+         return false;
+     }
+ 
+-    return true;
++    // A surface-backed pool hands out new buffers after the client switches
++    // the output surface (MediaCodec.setOutputSurface, as apps do when a
++    // TextureView moves), and the old ones never come back. Dropping every
++    // unknown buffer would stall decoding for good. The surface bounds how
++    // many buffers are out, and the decoder fetches only for a free V4L2
++    // buffer, which it remaps to the new block.
++    switch (mBlockPool->getAllocatorId()) {
++    case C2PlatformAllocatorStore::IGBA:
++    case C2PlatformAllocatorStore::BUFFERQUEUE:
++        return false;
++    default:
++        return true;
++    }
+ }
+ 
+ bool VideoFramePool::getVideoFrame(GetVideoFrameCB cb) {
+diff --git a/v4l2/V4L2Decoder.cpp b/v4l2/V4L2Decoder.cpp
+index 56ab02c..520c3cf 100644
+--- a/v4l2/V4L2Decoder.cpp
++++ b/v4l2/V4L2Decoder.cpp
+@@ -894,9 +894,21 @@ void V4L2Decoder::onVideoFrameReady(
+         outputBuffer = mOutputQueue->getFreeBuffer(v4l2BufferId);
+         ALOG_ASSERT(v4l2BufferId == outputBuffer->bufferId());
+     } else {
+-        // If this happens, this is a bug in VideoFramePool. It should never
+-        // provide more blocks than we have V4L2 buffers.
+-        ALOGE("Got more different blocks than we have V4L2 buffers for.");
++        // Every V4L2 buffer is mapped already: a surface-backed pool gives
++        // new blocks after an output surface switch. With DMABUF memory any
++        // free V4L2 buffer can take the new block; its old block is not at
++        // the device, so it is simply forgotten.
++        outputBuffer = mOutputQueue->getFreeBuffer();
++        if (outputBuffer) {
++            const size_t v4l2BufferId = outputBuffer->bufferId();
++            for (auto it = mBlockIdToV4L2Id.begin(); it != mBlockIdToV4L2Id.end();) {
++                it = it->second == v4l2BufferId ? mBlockIdToV4L2Id.erase(it) : std::next(it);
++            }
++            mBlockIdToV4L2Id.emplace(blockId, v4l2BufferId);
++            ALOGV("Remapped V4L2 buffer %zu to new block %u", v4l2BufferId, blockId);
++        } else {
++            ALOGE("Got a new block with no free V4L2 buffer for it.");
++        }
+     }
+ 
+     if (!outputBuffer) {
