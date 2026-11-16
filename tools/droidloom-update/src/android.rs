@@ -220,6 +220,10 @@ const PATCHES: &[(&str, &str)] = &[
         "android/aosp-patches/0039-v4l2-codec2-output-surface-switch.patch",
     ),
     (
+        "external/v4l2_codec2",
+        "android/aosp-patches/0040-v4l2-codec2-aidl-bufferpool-blocks.patch",
+    ),
+    (
         "frameworks/av",
         "android/audio/0001-host-buffered-playback.patch",
     ),

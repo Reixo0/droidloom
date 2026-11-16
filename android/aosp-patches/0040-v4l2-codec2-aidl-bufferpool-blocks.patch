@@ -1,0 +1,57 @@
+v4l2_codec2: accept AIDL bufferpool blocks in byte buffer mode
+
+Without an output surface, VideoFramePool identifies each graphic block
+by its bufferpool ID. It only knew HIDL bufferpool blocks. The AIDL
+Codec2 HAL hands out AIDL bufferpool2 blocks, and a client whose pool
+mask lacks GRALLOC configures the basic pool, whose blocks carry no pool
+data: the null pool data was dereferenced and the whole decoder service
+crashed (SIGSEGV in getBufferIdFromGraphicBlock), taking every hardware
+decoding session with it.
+
+AIDL bufferpool2 blocks now give their buffer ID, and a block without
+pool data fails its session with an error instead of crashing.
+
+diff --git a/components/Android.bp b/components/Android.bp
+index 73efcf2..8cce7ea 100644
+--- a/components/Android.bp
++++ b/components/Android.bp
+@@ -41,6 +41,7 @@ cc_library {
+         "libcutils",
+         "liblog",
+         "libsfplugin_ccodec_utils",
++        "libstagefright_aidl_bufferpool2",
+         "libstagefright_bufferqueue_helper",
+         "libstagefright_foundation",
+         "libui",
+diff --git a/components/VideoFramePool.cpp b/components/VideoFramePool.cpp
+index 66e2bcd..df69237 100644
+--- a/components/VideoFramePool.cpp
++++ b/components/VideoFramePool.cpp
+@@ -12,6 +12,7 @@
+ 
+ #include <C2BlockInternal.h>
+ #include <bufferpool/BufferPoolTypes.h>
++#include <bufferpool2/BufferPoolTypes.h>
+ 
+ #include <android/hardware/graphics/common/1.0/types.h>
+ #include <base/bind.h>
+@@ -53,7 +54,18 @@ std::optional<uint32_t> VideoFramePool::getBufferIdFromGraphicBlock(C2BlockPool&
+     case V4L2AllocatorId::SECURE_LINEAR: {
+         std::shared_ptr<_C2BlockPoolData> blockPoolData =
+                 _C2BlockFactory::GetGraphicBlockPoolData(block);
+-        if (blockPoolData->getType() != _C2BlockPoolData::TYPE_BUFFERPOOL) {
++        // The AIDL Codec2 HAL hands out AIDL-BufferPool blocks; a client
++        // without a GRALLOC pool falls back to the basic pool, whose blocks
++        // carry no pool data at all.
++        if (blockPoolData && blockPoolData->getType() == _C2BlockPoolData::TYPE_BUFFERPOOL2) {
++            std::shared_ptr<bufferpool2_BufferPoolData> bpData;
++            if (!_C2BlockFactory::GetBufferPoolData(blockPoolData, &bpData) || !bpData) {
++                ALOGE("BufferPoolData unavailable in block.");
++                return std::nullopt;
++            }
++            return bpData->mId;
++        }
++        if (!blockPoolData || blockPoolData->getType() != _C2BlockPoolData::TYPE_BUFFERPOOL) {
+             ALOGE("Obtained C2GraphicBlock is not bufferpool-backed.");
+             return std::nullopt;
+         }
