@@ -165,7 +165,11 @@ impl View {
     /// Show `clear`, a transparent pixel, instead of unmapping: a compositor
     /// may show a newly mapped surface's first buffer a frame late, and an
     /// empty full-window layer reads as a black flash.
-    fn hide(&mut self, clear: &wl_buffer::WlBuffer) {
+    /// `grant` is the frame whose parent commit replaces this view's content
+    /// (the composed root or the new scene). A hide committed without it is
+    /// applied at once, a frame before that parent: the window behind the
+    /// view shows through for one frame (white blinks over YouTube's video).
+    fn hide(&mut self, clear: &wl_buffer::WlBuffer, grant: Option<&frame_timeline::Target>) {
         if self.content.take().is_some() {
             if let Some(sync) = self.sync.take() {
                 sync.destroy();
@@ -185,6 +189,9 @@ impl View {
             }
             self.surface.attach(Some(clear), 0, 0);
             self.surface.damage_buffer(0, 0, i32::MAX, i32::MAX);
+            if let (Some(timeline), Some(grant)) = (&self.timeline, grant) {
+                timeline.target(grant);
+            }
             self.surface.commit();
         }
     }
@@ -195,6 +202,7 @@ fn recycle_views(
     spare: &mut Vec<View>,
     ids: &BTreeSet<u64>,
     clear: &wl_buffer::WlBuffer,
+    grant: Option<&frame_timeline::Target>,
 ) {
     let removed: Vec<_> = views
         .keys()
@@ -203,7 +211,7 @@ fn recycle_views(
         .collect();
     for id in removed {
         let mut view = views.remove(&id).expect("removed view exists");
-        view.hide(clear);
+        view.hide(clear, grant);
         // Subsurface destruction unmaps immediately, even while the parent's
         // replacement transaction is blocked on an acquire fence. Retain the
         // role and synchronize its hiding/reassignment with that transaction.
@@ -473,7 +481,7 @@ impl Stream {
     }
     /// Detach children in the parent's pending transaction. Their original
     /// read records survive until the compositor releases each buffer.
-    pub fn hide(&mut self) -> bool {
+    pub fn hide(&mut self, grant: Option<&frame_timeline::Target>) -> bool {
         if !self.active {
             return false;
         }
@@ -482,7 +490,7 @@ impl Stream {
             .as_ref()
             .expect("an active stream has its clear pixel");
         for view in self.views.values_mut() {
-            view.hide(clear);
+            view.hide(clear, grant);
         }
         self.active = false;
         true
@@ -795,7 +803,7 @@ impl App {
                         stream.waiting = None;
                         stream.end_wait("dropped at disconnect");
                         stream.staged.clear();
-                        stream.hide();
+                        stream.hide(None);
                         if let Some(surface) = self.tasks[&object].surface() {
                             surface.commit();
                         }
@@ -1286,6 +1294,7 @@ impl App {
             &mut stream.spare_views,
             &ids,
             stream.clear.as_ref().unwrap(),
+            target_grant,
         );
         let mut previous = root.clone();
         let mut previous_id = None;

@@ -1330,7 +1330,10 @@ impl App {
                 );
             }
         }
-        let layers_hidden = task.layers.as_mut().is_some_and(|layers| layers.hide());
+        let layers_hidden = task
+            .layers
+            .as_mut()
+            .is_some_and(|layers| layers.hide(target_grant.as_ref()));
         if layers_hidden {
             if let Some(viewport) = task.viewport.as_ref() {
                 viewport.set_source(-1.0, -1.0, -1.0, -1.0);
@@ -1608,7 +1611,7 @@ impl App {
         surface.commit();
         task.timeline.stop();
         if let Some(stream) = task.layers.as_mut() {
-            stream.hide();
+            stream.hide(None);
         }
         if let Some(fractional_scale) = task.fractional_scale.take() {
             fractional_scale.destroy();

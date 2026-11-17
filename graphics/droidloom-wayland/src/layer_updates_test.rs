@@ -264,7 +264,7 @@ fn color_and_buffer_solid_transitions_commit_and_hiding_invalidates_both_kinds()
     ] {
         wire.update(&mut view, geometry(), content);
         wire.requests();
-        view.hide(&wire.buffer);
+        view.hide(&wire.buffer, None);
         let requests = wire.requests();
         assert_eq!(count(&requests, &view.surface, "attach"), 1);
         assert_eq!(count(&requests, &view.surface, "commit"), 1);
@@ -275,7 +275,7 @@ fn color_and_buffer_solid_transitions_commit_and_hiding_invalidates_both_kinds()
         assert_eq!(count(&requests, &view.role, "set_position"), 1);
         assert_eq!(view.geometry, None);
         assert_eq!(view.source(), None);
-        view.hide(&wire.buffer);
+        view.hide(&wire.buffer, None);
         assert!(wire.requests().is_empty());
         wire.update(&mut view, geometry(), content);
         let requests = wire.requests();
@@ -323,7 +323,7 @@ fn replacement_scene_keeps_old_roles_alive_until_synchronized_state_applies() {
     wire.root.commit();
     wire.requests();
 
-    recycle_views(&mut views, &mut spare, &BTreeSet::from([2]), &wire.buffer);
+    recycle_views(&mut views, &mut spare, &BTreeSet::from([2]), &wire.buffer, None);
     assert_eq!(spare.len(), 1);
     assert_eq!(spare[0].geometry, None);
     let view = view_for_layer(&mut views, &mut spare, 2, || {
@@ -357,7 +357,7 @@ fn changing_layer_ids_reuses_a_bounded_pool_and_hidden_views_do_not_resurrect() 
     let mut allocations = 0;
     for scene in 0..100_u64 {
         let ids: BTreeSet<_> = (0..1 + scene % 3).map(|id| scene * 3 + id).collect();
-        recycle_views(&mut views, &mut spare, &ids, &wire.buffer);
+        recycle_views(&mut views, &mut spare, &ids, &wire.buffer, None);
         for id in &ids {
             let view = view_for_layer(&mut views, &mut spare, *id, || {
                 allocations += 1;
@@ -379,7 +379,7 @@ fn changing_layer_ids_reuses_a_bounded_pool_and_hidden_views_do_not_resurrect() 
         }
     }
     assert_eq!(allocations, 3);
-    recycle_views(&mut views, &mut spare, &BTreeSet::new(), &wire.buffer);
+    recycle_views(&mut views, &mut spare, &BTreeSet::new(), &wire.buffer, None);
     wire.root.commit();
     assert!(views.is_empty());
     assert_eq!(spare.len(), 3);
