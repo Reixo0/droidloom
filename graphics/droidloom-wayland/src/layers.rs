@@ -1177,9 +1177,11 @@ impl App {
         }
         let now = monotonic_timestamp_nanos()?;
         let Some(target) = task.timeline.reserve(now) else {
+            task.timeline.note_park(now);
             stream.park(object, commit, "no frame grant");
             return Ok(());
         };
+        task.timeline.note_frame(now);
         self.android_frame(now, target.target.as_ref());
         self.commit_layers(
             qh,

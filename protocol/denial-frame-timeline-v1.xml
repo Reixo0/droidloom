@@ -31,7 +31,7 @@
     released like any other.
   </description>
 
-  <interface name="denial_frame_timeline_manager_v1" version="1">
+  <interface name="denial_frame_timeline_manager_v1" version="2">
     <description summary="frame timeline factory">
       The global is optional. Clients requiring exact presentation must fail
       closed when it is absent rather than synthesize another clock.
@@ -57,7 +57,7 @@
     <request name="destroy" type="destructor"/>
   </interface>
 
-  <interface name="denial_output_frame_timeline_v1" version="1">
+  <interface name="denial_output_frame_timeline_v1" version="2">
     <description summary="demand-driven grants for one output"/>
 
     <enum name="error">
@@ -73,6 +73,18 @@
     </request>
 
     <request name="destroy" type="destructor"/>
+
+    <request name="content_rate" since="2">
+      <description summary="the client's content ran at this rate just now">
+        A client whose content is produced on its own clock, faster than the
+        grants it receives, reports the rate it measured. The report holds
+        only briefly: a client keeps the rate up by repeating it while its
+        content stays fast, and stops sending when it slows down. The
+        compositor may raise the output's refresh rate in response. Zero is
+        ignored.
+      </description>
+      <arg name="millihz" type="uint" summary="measured content rate in mHz"/>
+    </request>
 
     <event name="grant">
       <description summary="one future presentation opportunity">
@@ -104,7 +116,7 @@
     </event>
   </interface>
 
-  <interface name="denial_surface_frame_timeline_v1" version="1">
+  <interface name="denial_surface_frame_timeline_v1" version="2">
     <description summary="exact target for an ordinary wl_surface commit">
       set_target is double-buffered surface state and applies to the next
       wl_surface.commit. It is consumed by that commit. An expired, unissued,

@@ -7,7 +7,7 @@ use super::{
 };
 use smithay_client_toolkit::globals::GlobalData;
 use smithay_client_toolkit::registry::RegistryHandler;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, VecDeque};
 use wayland_protocols::wp::presentation_time::client::wp_presentation::{self, WpPresentation};
 
 mod protocol {
@@ -188,7 +188,97 @@ impl Subscription {
     pub fn is(&self, proxy: &OutputTimeline) -> bool {
         self.proxy == *proxy
     }
+    fn report_content_rate(&self, millihz: u32) {
+        if self.proxy.version() >= 2 {
+            self.proxy.content_rate(millihz);
+        }
+    }
 }
+
+/// Android content faster than this asks Denial for its high refresh rate.
+/// Matches Denial's own threshold for fast content.
+const FAST_CONTENT_MILLIHZ: u64 = 80_000;
+/// Frames in a row whose rate counts.
+const RATE_FRAMES: usize = 6;
+/// Android frames that had to wait for a grant, in a row, and the rate
+/// above which they mean Android draws faster than the output.
+const PARK_FRAMES: usize = 4;
+const FAST_PARK_MILLIHZ: u64 = 20_000;
+/// How often a fast rate is repeated; Denial holds it for 300 ms.
+const RATE_REPORT_NANOS: u64 = 100_000_000;
+
+/// Times of the last few events of one kind and the rate they ran at.
+struct EventRate<const N: usize> {
+    times: VecDeque<u64>,
+}
+impl<const N: usize> Default for EventRate<N> {
+    fn default() -> Self {
+        Self {
+            times: VecDeque::with_capacity(N),
+        }
+    }
+}
+impl<const N: usize> EventRate<N> {
+    fn note(&mut self, now: u64) -> Option<u64> {
+        if self.times.len() == N {
+            self.times.pop_front();
+        }
+        self.times.push_back(now);
+        if self.times.len() < N {
+            return None;
+        }
+        let span = now.saturating_sub(*self.times.front()?);
+        (span > 0).then(|| (N as u64 - 1) * 1_000_000_000_000 / span)
+    }
+}
+
+/// Android draws on its own vsync, and Denial sees at most one of its frames
+/// per grant, so at the low refresh rate fast Android content never shows in
+/// Denial's own measurement. The task reports it instead, from two signals:
+/// - frames shown faster than `FAST_CONTENT_MILLIHZ` (the output already
+///   runs fast and the content keeps up with it);
+/// - frames that keep arriving before their grant: SurfaceFlinger composes
+///   ahead of every grant only when its content is faster than the output.
+#[derive(Default)]
+struct RateMeter {
+    frames: EventRate<RATE_FRAMES>,
+    parks: EventRate<PARK_FRAMES>,
+    /// The frame waiting now was counted; it is retried on every grant
+    /// and release until shown.
+    waiting: bool,
+    last_report: Option<u64>,
+}
+impl RateMeter {
+    fn report(&mut self, now: u64, millihz: u64) -> Option<u32> {
+        if self
+            .last_report
+            .is_some_and(|last| now.saturating_sub(last) < RATE_REPORT_NANOS)
+        {
+            return None;
+        }
+        self.last_report = Some(now);
+        Some(u32::try_from(millihz).unwrap_or(u32::MAX))
+    }
+    /// One Android frame was shown; returns the rate to report, if any.
+    fn frame(&mut self, now: u64) -> Option<u32> {
+        self.waiting = false;
+        let millihz = self.frames.note(now)?;
+        (millihz >= FAST_CONTENT_MILLIHZ)
+            .then(|| self.report(now, millihz))
+            .flatten()
+    }
+    /// One Android frame waits for a grant; returns the rate to report.
+    fn park(&mut self, now: u64) -> Option<u32> {
+        if std::mem::replace(&mut self.waiting, true) {
+            return None;
+        }
+        let millihz = self.parks.note(now)?;
+        (millihz >= FAST_PARK_MILLIHZ)
+            .then(|| self.report(now, FAST_CONTENT_MILLIHZ))
+            .flatten()
+    }
+}
+
 impl Drop for Subscription {
     fn drop(&mut self) {
         if self.armed {
@@ -212,6 +302,7 @@ pub(super) struct Timeline {
     pub queued: Option<QueuedFrame>,
     // Frames that reached an offered grant after its latch.
     pub late: u64,
+    rate: RateMeter,
 }
 impl Timeline {
     pub fn new<D: Dispatch<DenialSurfaceFrameTimelineV1, ()> + 'static>(
@@ -256,6 +347,23 @@ impl Timeline {
             }),
         })
     }
+    /// Counts one Android frame shown and reports fast content to Denial.
+    pub fn note_frame(&mut self, now: u64) {
+        let report = self.rate.frame(now);
+        self.report(report);
+    }
+    /// Counts one Android frame that waits for a grant.
+    pub fn note_park(&mut self, now: u64) {
+        let report = self.rate.park(now);
+        self.report(report);
+    }
+    fn report(&self, millihz: Option<u32>) {
+        if let Some(millihz) = millihz
+            && let Some(subscription) = self.subscription.as_ref()
+        {
+            subscription.report_content_rate(millihz);
+        }
+    }
     /// Arm or disarm grant delivery. A grant offered but not taken is dropped.
     pub fn arm(&mut self, armed: bool) {
         if let Some(subscription) = self.subscription.as_mut() {
@@ -298,6 +406,9 @@ impl App {
             .tasks
             .get_mut(&object)
             .ok_or(PresenterError::UnknownTask(object))?;
+        if let Ok(now) = monotonic_timestamp_nanos() {
+            task.timeline.note_frame(now);
+        }
         if !task.timeline.exact || !task.accepts_present() {
             return self.present(qh, &frame, &fence, None);
         }

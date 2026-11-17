@@ -3398,7 +3398,7 @@ fn run() -> Result<(), PresenterError> {
         compositor,
         xdg_shell,
         insets_manager: globals.bind(&qh, 1..=1, ()).ok(),
-        frame_timeline_manager: globals.bind(&qh, 1..=1, ()).ok(),
+        frame_timeline_manager: globals.bind(&qh, 1..=2, ()).ok(),
         clock: clock::Clock::new(),
         viewporter,
         fractional_scale_manager,
