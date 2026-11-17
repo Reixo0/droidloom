@@ -1,0 +1,27 @@
+Subject: [PATCH] Droidloom: room for the spares of two full-screen windows
+
+A task showing one activity over another on a 1216x2688 panel rotates
+ten 13 MB buffers. The 96 MiB spare budget evicted one per frame, the
+next use imported it again, and that frame was composed instead of
+placed, so direct and composed presentation alternated (black or stale
+frames in Spotify's player). Imports reference producer buffers and
+allocate nothing, so the budget rises to 256 MiB.
+---
+--- a/services/surfaceflinger/DroidloomImportRetention.h	2026-11-17 13:33:51.407859095 +0100
++++ b/services/surfaceflinger/DroidloomImportRetention.h	2026-11-17 13:33:51.430784020 +0100
+@@ -37,7 +37,14 @@
+     // A layer that switches between opaque and blended keeps both views of
+     // its buffers: three buffers, six views.
+     constexpr std::size_t kSpareCount = 12, kSparesPerLayer = 6;
+-    constexpr uint64_t kSpareBytes = 96ull * 1024 * 1024;
++    // Two full-screen windows of a task (an activity over another) on a
++    // 1216x2688 panel each rotate five 13 MB buffers: eight spares, 105 MB.
++    // A smaller budget evicted one spare per frame, its next use imported it
++    // again, and every such frame was composed instead of placed: direct and
++    // composed presentation alternated, which shows as black or stale
++    // frames. An import references the producer's buffer; it allocates
++    // nothing, so the budget bounds only host bookkeeping.
++    constexpr uint64_t kSpareBytes = 256ull * 1024 * 1024;
+     // Video spares are the decoder's own pool, alive while it plays anyway.
+     constexpr std::size_t kVideoSpares = 31;
+     constexpr uint64_t kVideoSpareBytes = 256ull * 1024 * 1024;

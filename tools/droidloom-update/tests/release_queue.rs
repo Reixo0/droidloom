@@ -159,23 +159,56 @@ fn host_fences_do_not_block_other_surfaces_or_commit_callbacks() {
 #[test]
 fn resize_imports_retire_after_release_without_churning_rotating_pools() {
     let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let patch = fs::read_to_string(
-        repo.join("android/surfaceflinger/0018-droidloom-import-retention.patch"),
+    // The policy as built: patch 0018 creates the header and later patches
+    // amend it, so apply every patch touching it in series order.
+    let temp = tempfile::tempdir().unwrap();
+    let file = "services/surfaceflinger/DroidloomImportRetention.h";
+    let mut patches: Vec<_> = fs::read_dir(repo.join("android/surfaceflinger"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "patch"))
+        .collect();
+    patches.sort();
+    fs::create_dir_all(temp.path().join("services/surfaceflinger")).unwrap();
+    let mut created = false;
+    for path in patches {
+        let text = fs::read_to_string(&path).unwrap();
+        // This file's section: from its "--- " line (before "+++ ") to the
+        // next file's.
+        let lines: Vec<&str> = text.lines().collect();
+        let Some(start) = lines
+            .iter()
+            .position(|line| line.starts_with("+++ ") && line.contains(file))
+            .and_then(|plus| plus.checked_sub(1))
+        else {
+            continue;
+        };
+        let end = lines[start + 1..]
+            .iter()
+            .position(|line| line.starts_with("diff --git ") || line.starts_with("--- "))
+            .map_or(lines.len(), |offset| start + 1 + offset);
+        let section: String = lines[start..end]
+            .iter()
+            .map(|line| format!("{line}\n"))
+            .collect();
+        let section_path = temp.path().join("section.patch");
+        fs::write(&section_path, &section).unwrap();
+        let status = Command::new("patch")
+            .args(["-p1", "-s", "--no-backup-if-mismatch", "-d"])
+            .arg(temp.path())
+            .arg("-i")
+            .arg(&section_path)
+            .status()
+            .unwrap();
+        assert!(status.success(), "{} does not apply", path.display());
+        created = true;
+    }
+    assert!(created, "retention policy is part of the Android patches");
+    fs::copy(
+        temp.path().join(file),
+        temp.path().join("DroidloomImportRetention.h"),
     )
     .unwrap();
-    let section = patch
-        .split("diff --git ")
-        .find(|section| {
-            section.starts_with("a/services/surfaceflinger/DroidloomImportRetention.h ")
-        })
-        .expect("retention policy is part of the Android patch");
-    let header: String = section
-        .lines()
-        .filter(|line| line.starts_with('+') && !line.starts_with("+++"))
-        .map(|line| format!("{}\n", &line[1..]))
-        .collect();
-    let temp = tempfile::tempdir().unwrap();
-    fs::write(temp.path().join("DroidloomImportRetention.h"), header).unwrap();
     let binary = temp.path().join("import-retention-test");
     let output = Command::new("c++")
         .args(["-std=c++20", "-Wall", "-Wextra", "-Werror", "-I"])

@@ -63,19 +63,38 @@ void rotatingPoolStaysImported() {
     assert(cache.size() == 4 && retirements == 0);
 }
 
+// One activity over another on a 1216x2688 panel: two layers rotating five
+// 13 MB buffers each. Every spare must stay imported, or each rotation
+// imports one again and that frame is composed.
+void twoFullScreenWindows() {
+    Cache cache;
+    Scene current;
+    for (uint64_t layer = 1; layer <= 2; ++layer) {
+        for (uint64_t slot = 0; slot <= 4; ++slot) {
+            const uint64_t id = layer * 10 + slot;
+            auto u = use(layer, 1216, 1216ull * 2688 * 4 + 49152, slot);
+            cache.try_emplace(id, u);
+            if (!slot) current.emplace(id, u);
+        }
+    }
+    int retirements = 0;
+    assert(!trimDroidloomImports(cache, current, [&](uint64_t) { return ++retirements, true; }));
+    assert(retirements == 0 && cache.size() == 10);
+}
+
 void pressureAndOwnership() {
     Cache cache;
     Scene current;
     for (uint64_t layer = 1; layer <= 8; ++layer) {
         for (uint64_t slot = 0; slot <= 4; ++slot) {
             const uint64_t id = layer * 10 + slot;
-            auto u = use(layer, 1920, 16 * MiB, slot);
+            auto u = use(layer, 1920, 48 * MiB, slot);
             cache.try_emplace(id, u);
             if (!slot) current.emplace(id, u);
         }
     }
     assert(!trimDroidloomImports(cache, current, [](uint64_t) { return true; }));
-    assert(cache.size() == current.size() + 6); // 96 MiB spare budget, across layers.
+    assert(cache.size() == current.size() + 5); // 256 MiB spare budget, across layers.
     for (const auto& [id, u] : current) assert(cache.contains(id));
 
     cache.clear(); current.clear();
@@ -165,5 +184,6 @@ int main() {
     resizeAndRelease();
     rotatingPoolStaysImported();
     pressureAndOwnership();
+    twoFullScreenWindows();
     newestCompatibleSpares();
 }
