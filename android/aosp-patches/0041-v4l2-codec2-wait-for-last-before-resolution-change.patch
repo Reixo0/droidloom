@@ -1,0 +1,144 @@
+diff --git a/v4l2/V4L2Decoder.cpp b/v4l2/V4L2Decoder.cpp
+index 520c3cf..2d6bd13 100644
+--- a/v4l2/V4L2Decoder.cpp
++++ b/v4l2/V4L2Decoder.cpp
+@@ -31,6 +31,10 @@ namespace {
+ // Extra buffers for transmitting in the whole video pipeline.
+ constexpr size_t kNumExtraOutputBuffers = 4;
+ 
++// How long to keep decoding the old sequence after a source change before
++// giving up on its LAST buffer.
++constexpr int kResolutionChangeTimeoutMs = 1000;
++
+ bool waitForDRC(const C2ConstLinearBlock& input, std::optional<VideoCodec> codec) {
+     C2ReadView view = input.map().get();
+     const uint8_t* pos = view.data();
+@@ -588,7 +592,20 @@ void V4L2Decoder::flush() {
+     // has failed, e.g. a stop the firmware did not acknowledge in time. Report
+     // it: going back to Idle would leave the client waiting on a dead session
+     // until its own watchdog fires, and it would reuse that session again.
+-    if (!mInputQueue->streamon() || (isOutputStreaming && !mOutputQueue->streamon())) {
++    if (!mInputQueue->streamon()) {
++        ALOGE("Failed to streamon after flush.");
++        onError();
++        return;
++    }
++    if (mResolutionChangePending) {
++        // The flush dropped the rest of the old sequence: switch now.
++        mResolutionChangePending = false;
++        ++mResolutionChangeGeneration;
++        if (!changeResolution()) {
++            onError();
++            return;
++        }
++    } else if (isOutputStreaming && !mOutputQueue->streamon()) {
+         ALOGE("Failed to streamon after flush.");
+         onError();
+         return;
+@@ -716,6 +733,15 @@ void V4L2Decoder::serviceDeviceTask(bool event) {
+             mFrameAtDevice.insert(std::make_pair(bufferId, std::move(frame)));
+         }
+ 
++        if (mResolutionChangePending && isLast) {
++            // The old sequence is complete; DQBUF would fail with EPIPE from
++            // here on, so stop and switch to the new format now.
++            ALOGI("Last buffer before the resolution change arrived.");
++            finishResolutionChange();
++            if (mState == State::Error) return;
++            break;
++        }
++
+         if (mDrainCb && isLast) {
+             ALOGV("All buffers are drained.");
+             sendV4L2DecoderCmd(true);
+@@ -724,11 +750,29 @@ void V4L2Decoder::serviceDeviceTask(bool event) {
+         }
+     }
+ 
+-    // Handle resolution change event.
+-    if (event && dequeueResolutionChangeEvent()) {
+-        if (!changeResolution()) {
+-            onError();
+-            return;
++    // Handle resolution change event. With pictures of the old sequence still
++    // in flight the stateful API requires the client to keep queueing CAPTURE
++    // buffers until one comes back marked LAST before stopping the queue.
++    // Stopping it early (as upstream does) leaves Qualcomm's iris firmware in
++    // an unfinished change: it later writes an old-size picture into a new,
++    // smaller buffer, then crashes.
++    if (event && dequeueResolutionChangeEvent() && !mResolutionChangePending) {
++        if (mInitialEosBuffer || !mVideoFramePool || !mOutputQueue->isStreaming() ||
++            (mOutputQueue->queuedBuffersCount() == 0 && mOutputQueue->freeBuffersCount() == 0)) {
++            if (!changeResolution()) {
++                onError();
++                return;
++            }
++        } else {
++            ALOGI("Resolution change: waiting for the last buffer of the old sequence.");
++            mResolutionChangePending = true;
++            const uint32_t generation = ++mResolutionChangeGeneration;
++            mTaskRunner->PostDelayedTask(
++                    FROM_HERE,
++                    ::base::BindOnce(&V4L2Decoder::onResolutionChangeTimeout, mWeakThis,
++                                     generation),
++                    ::base::TimeDelta::FromMilliseconds(kResolutionChangeTimeoutMs));
++            outputDequeued = true;  // make sure free buffers go back to the driver
+         }
+     }
+ 
+@@ -760,6 +804,30 @@ bool V4L2Decoder::dequeueResolutionChangeEvent() {
+     return false;
+ }
+ 
++void V4L2Decoder::finishResolutionChange() {
++    ALOG_ASSERT(mTaskRunner->RunsTasksInCurrentSequence());
++
++    mResolutionChangePending = false;
++    ++mResolutionChangeGeneration;
++    if (!changeResolution()) {
++        onError();
++    }
++}
++
++void V4L2Decoder::onResolutionChangeTimeout(uint32_t generation) {
++    ALOG_ASSERT(mTaskRunner->RunsTasksInCurrentSequence());
++
++    if (!mResolutionChangePending || generation != mResolutionChangeGeneration ||
++        mState == State::Error) {
++        return;
++    }
++    // Some drivers end the old sequence without marking a buffer (the
++    // driver then already finished the change), so do not wait forever.
++    ALOGW("No last buffer %d ms after the resolution change, switching anyway.",
++          kResolutionChangeTimeoutMs);
++    finishResolutionChange();
++}
++
+ bool V4L2Decoder::changeResolution() {
+     ATRACE_CALL();
+     ALOGV("%s()", __func__);
+diff --git a/v4l2/include/v4l2_codec2/v4l2/V4L2Decoder.h b/v4l2/include/v4l2_codec2/v4l2/V4L2Decoder.h
+index e537f0c..26cf1d2 100644
+--- a/v4l2/include/v4l2_codec2/v4l2/V4L2Decoder.h
++++ b/v4l2/include/v4l2_codec2/v4l2/V4L2Decoder.h
+@@ -96,6 +96,8 @@ private:
+     std::optional<struct v4l2_format> getFormatInfo();
+     Rect getVisibleRect(const ui::Size& codedSize);
+     bool sendV4L2DecoderCmd(bool start);
++    void finishResolutionChange();
++    void onResolutionChangeTimeout(uint32_t generation);
+     bool tryV4L2DecoderCmd(bool start);
+ 
+     void setState(State newState);
+@@ -116,6 +118,11 @@ private:
+     std::map<int32_t, DecodeCB> mPendingDecodeCbs;
+     // Marks that we need to wait for DRC before drain can complete.
+     bool mPendingDRC = false;
++    // A source change was signalled while CAPTURE was streaming: keep cycling
++    // the current buffers until the driver returns the one marked LAST (the
++    // final picture of the old sequence), then reallocate.
++    bool mResolutionChangePending = false;
++    uint32_t mResolutionChangeGeneration = 0;
+     // Holds information about secure playback, which won't allow decoder to
+     // access frames in order to provide extra meta information (like checking
+     // for pending DRC).

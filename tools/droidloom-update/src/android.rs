@@ -224,6 +224,10 @@ const PATCHES: &[(&str, &str)] = &[
         "android/aosp-patches/0040-v4l2-codec2-aidl-bufferpool-blocks.patch",
     ),
     (
+        "external/v4l2_codec2",
+        "android/aosp-patches/0041-v4l2-codec2-wait-for-last-before-resolution-change.patch",
+    ),
+    (
         "frameworks/av",
         "android/audio/0001-host-buffered-playback.patch",
     ),
