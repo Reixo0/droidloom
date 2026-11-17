@@ -1101,6 +1101,12 @@ impl App {
             let Some((lw, lh)) = task.logical_size else {
                 return false;
             };
+            // Video is placed at the nearest logical pixel. At a fractional
+            // scale the exact grid is too coarse for it, and a pixel of
+            // stretch inside a video frame is invisible.
+            if l.representation != 0 {
+                return true;
+            }
             let [x, y, w, h] = l.destination;
             [
                 (i64::from(x), lw, width),

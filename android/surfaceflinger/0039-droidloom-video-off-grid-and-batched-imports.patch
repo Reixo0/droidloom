@@ -1,0 +1,105 @@
+From: Reixo <125610085+Reixo0@users.noreply.github.com>
+Subject: [PATCH] SurfaceFlinger: keep video direct through grid, import and retry hiccups
+
+At a fractional scale video rarely lands on the exact logical grid, so
+rotation and resizes composed every frame and each switch blinked. Let
+video layers be placed at the nearest logical pixel. Hold the last video
+frame while a new buffer waits for a slot in the import batch, as already
+done for an import in flight. And answer a retried scene by sending it
+again instead of composing: the host retries whenever its frame
+timeline starts a new epoch, and each detour through composition hid and
+reshowed the video, a white blink. The scene goes again against the layers
+the host still shows, keeping their reads; a second retry in a row composes.
+---
+--- a/services/surfaceflinger/DroidloomLayers.cpp
++++ b/services/surfaceflinger/DroidloomLayers.cpp
+@@ -589,6 +589,11 @@
+     std::unordered_map<uint32_t, Export> lastVideo;
+     bool live = true;
+     bool retryOnRelease = false;
++    // A retried scene was sent again direct once; a second retry composes.
++    bool resent = false;
++    // What the host shows: the layers of the last scene before the one in
++    // flight. A retried scene never reached the screen.
++    std::unordered_map<uint32_t, Last> shown;
+     std::atomic<uint64_t> workRevision{1};
+ };
+ bool droidloomAsyncReleasesEnabled() {
+@@ -705,6 +710,7 @@
+     mState->completed.wait(lock, [&] { return !mState->live || !mState->commits.busy(); });
+     mScene.clear();
+     mLayers.clear();
++    mState->shown.clear();
+ }
+ bool DroidloomLayers::transact(uint32_t opcode, const std::vector<uint8_t>& payload,
+                                const std::vector<int>& fds) {
+@@ -753,7 +759,22 @@
+         bool unplaceable = false;
+         if (mState->commits.takeFallback(&unplaceable)) {
+             if (unplaceable) mUnplaceable = sceneShape(mScene);
+-            return false;
++            // A retry often only means the host dropped the wait for its
++            // frame slot (a new frame timeline epoch, say). Composing for it
++            // hides and reshows the video, which blinks; send the same scene
++            // again in full instead. A second retry in a row composes.
++            if (unplaceable || mState->resent) {
++                mState->resent = false;
++                return false;
++            }
++            mState->resent = true;
++            // Send again against what the host still shows: its reads stay
++            // as they are, and only the retried changes go again. A scene
++            // that can never match keeps this direct (empty reads composed).
++            mScene = {UINT64_MAX};
++            mLayers = mState->shown;
++        } else {
++            mState->resent = false;
+         }
+     }
+     std::array<uint32_t, 4> config;
+@@ -856,6 +877,10 @@
+     // Compose a scene the host cannot place without asking it: asking costs a
+     // frame while the answer travels.
+     for (const auto& e : exports) {
++        // Video goes to the nearest logical pixel instead: at a fractional
++        // scale the exact grid is too coarse to snap it to, and a pixel of
++        // stretch inside a video frame is invisible.
++        if (e.representation) continue;
+         const auto& d = e.destination;
+         if (!onLogicalGrid({d.left, d.top, d.right, d.bottom}, logical, width, height)) {
+             return false;
+@@ -935,8 +960,10 @@
+             for (auto& e : exports) {
+                 const auto status = mState->imports.status(e.import);
+                 if (status == ImportQueue::Status::Ready) continue;
+-                // A failed or unqueued import composes, as any other layer.
+-                if (!e.representation || status != ImportQueue::Status::Pending) return false;
++                // A failed import composes, as any other layer. One still
++                // waiting for a slot in the import batch is held like a
++                // pending one: the batch completion recomposes.
++                if (!e.representation || status == ImportQueue::Status::Failed) return false;
+                 const auto last = mState->lastVideo.find(e.id);
+                 const auto old = mLayers.find(e.id);
+                 // Hold only a frame whose host read is still open: its buffer
+@@ -1046,6 +1073,10 @@
+         }
+         if (id == 1) ALOGI("Droidloom asynchronous layer commits enabled (one scene in flight)");
+         if (id == 1 && batched) ALOGI("Droidloom scene batches enabled (16 layers / 4 fences per packet)");
++        {
++            std::lock_guard lock(mState->mutex);
++            mState->shown = mLayers;
++        }
+         mLayers = std::move(next);
+         mScene = std::move(scene);
+         rememberVideo();
+@@ -1064,6 +1095,10 @@
+         if (static_cast<int32_t>(reply[0]) == kUnplaceable) mUnplaceable = sceneShape(scene);
+         return reject();
+     }
++    {
++        std::lock_guard lock(mState->mutex);
++        mState->shown = mLayers;
++    }
+     mLayers = std::move(next);
+     mScene = std::move(scene);
+     rememberVideo();
