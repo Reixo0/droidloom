@@ -70,7 +70,8 @@ fn failed(message: &str) -> Status {
     Status::new_service_specific_error_str(NfcStatus::FAILED.0, Some(message))
 }
 
-/// Waits up to `POLL_MS` for the device to have a packet.
+/// Waits up to `POLL_MS` for the device to have a packet, or an error for
+/// `read` to report (the controller gone, say).
 fn readable(device: &File) -> bool {
     let mut poll = libc::pollfd {
         fd: device.as_raw_fd(),
@@ -79,7 +80,7 @@ fn readable(device: &File) -> bool {
     };
     // SAFETY: one pollfd, owned by this frame for the whole call.
     let ready = unsafe { libc::poll(&mut poll, 1, POLL_MS) };
-    ready > 0 && poll.revents & libc::POLLIN != 0
+    ready > 0 && poll.revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0
 }
 
 /// Hands every packet from the controller to Android until stopped.
