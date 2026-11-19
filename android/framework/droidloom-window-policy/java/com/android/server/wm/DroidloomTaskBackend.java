@@ -47,6 +47,13 @@ final class DroidloomTaskBackend {
     // Tasks with a shown FLAG_KEEP_SCREEN_ON window, as of the last surface placement.
     private final IdentityHashMap<Task, Boolean> mKeepScreenOn = new IdentityHashMap<>();
     private final IdentityHashMap<Task, Boolean> mPlacedKeepScreenOn = new IdentityHashMap<>();
+    // Host resizes Android has not applied yet, under mService.mGlobalLock. A
+    // resize queued behind a running transition changes the bounds later
+    // without any task-stack notification; input must follow it.
+    private final IdentityHashMap<Task, Rect> mResizing = new IdentityHashMap<>();
+    private long mResizeDeadline;
+    // Set by snapshot() on mWorker: a resize is still pending.
+    private boolean mResizePending;
     // Accessed only on mWorker. Background tasks retain their existing host window.
     private final IdentityHashMap<Task, Snapshot> mPublished = new IdentityHashMap<>();
     private final IdentityHashMap<Task, Snapshot> mInputPublished = new IdentityHashMap<>();
@@ -175,6 +182,10 @@ final class DroidloomTaskBackend {
             }, true);
             mIncarnations.keySet().retainAll(live.keySet());
             mCreatedOver.keySet().retainAll(live.keySet());
+            mResizing.keySet().retainAll(live.keySet());
+            mResizing.entrySet().removeIf(entry -> entry.getKey().getBounds().equals(entry.getValue()));
+            if (SystemClock.uptimeMillis() > mResizeDeadline) mResizing.clear();
+            mResizePending = !mResizing.isEmpty();
         }
         return tasks;
     }
@@ -222,7 +233,11 @@ final class DroidloomTaskBackend {
             else { retry = true; break; }
         }
         if (retry) mWorker.postDelayed(mReconcile, 1000);
-        else mFocused = focused;
+        else {
+            mFocused = focused;
+            // Republish input once Android applies a deferred host resize.
+            if (mResizePending) mWorker.postDelayed(mReconcile, 50);
+        }
     }
 
     private void checkConnection() {
@@ -289,6 +304,10 @@ final class DroidloomTaskBackend {
                     // Direct call in system_server: preserve ATMS's existing
                     // Shell transition collection, configuration and surface crop.
                     mService.resizeTask(task.mTaskId, bounds, 0 /* RESIZE_MODE_SYSTEM */);
+                    if (!task.getBounds().equals(bounds)) {
+                        mResizing.put(task, bounds);
+                        mResizeDeadline = SystemClock.uptimeMillis() + 3000;
+                    }
                     break;
                 case 3:
                     mService.removeTask(task, "droidloom-host-close");
