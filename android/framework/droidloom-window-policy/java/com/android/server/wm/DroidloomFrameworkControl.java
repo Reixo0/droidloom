@@ -65,8 +65,10 @@ public final class DroidloomFrameworkControl {
         Settings.Global.putInt(context.getContentResolver(), "force_resizable_activities", 1);
         new LockPatternUtils(context).setLockScreenDisabled(true, 0);
         Settings.System.putIntForUser(context.getContentResolver(), "screen_off_timeout", Integer.MAX_VALUE, 0);
-        for (String setting : new String[] {"peak_refresh_rate", "min_refresh_rate"})
-            Settings.System.putFloatForUser(context.getContentResolver(), setting, Float.POSITIVE_INFINITY, 0);
+        // Up to the host's rate, down to the lowest mode: SurfaceFlinger
+        // picks per content and Denial's refresh rate follows its choice.
+        Settings.System.putFloatForUser(context.getContentResolver(), "peak_refresh_rate", Float.POSITIVE_INFINITY, 0);
+        Settings.System.putFloatForUser(context.getContentResolver(), "min_refresh_rate", 0f, 0);
         // The host's name, given by the supervisor at each start (identity.rs).
         String name = SystemProperties.get("ro.droidloom.device_name");
         if (!name.isEmpty()) Settings.Global.putString(context.getContentResolver(), Settings.Global.DEVICE_NAME, name);

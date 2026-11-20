@@ -126,6 +126,7 @@ PRODUCT_VENDOR_PROPERTIES += \
     debug.sf.late.app.duration=9333333 \
     debug.sf.early.app.duration=15666666 \
     debug.sf.earlyGl.app.duration=15666666 \
+    debug.sf.frame_rate_multiple_threshold=120 \
     persist.audio.normal_playback_period_ms=5 \
     ro.zygote=zygote64 \
     dalvik.vm.dex2oat64.enabled=true \

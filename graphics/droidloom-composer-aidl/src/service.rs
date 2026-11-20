@@ -66,6 +66,12 @@ use droidloom_transport::Configure;
 use crate::{execute_commands, NativeBufferAdapter};
 
 const CONFIG_ID: i32 = 0;
+/// The low mode offered next to the host's rate. Denial's automatic refresh
+/// rate drops panels that switch rates live to 60 Hz; with both modes,
+/// SurfaceFlinger chooses per content (a 60 fps video, touch, animations)
+/// as on a phone, and the choice reaches the host as the task's frame rate.
+const LOW_CONFIG_ID: i32 = 1;
+const LOW_REFRESH_MILLIHZ: u32 = 60_000;
 const CONFIG_GROUP: i32 = 0;
 const UNKNOWN_DPI_MILLI: i32 = -1;
 
@@ -73,6 +79,79 @@ const UNKNOWN_DPI_MILLI: i32 = -1;
 pub type SharedSession = Arc<Mutex<Session>>;
 
 type SharedCallback = Arc<Mutex<Option<Strong<dyn IComposerCallback>>>>;
+/// Told each task display's chosen refresh rate in millihertz.
+pub type FrameRateListener = Box<dyn Fn(DisplayId, u32) + Send + Sync>;
+
+/// Which displays SurfaceFlinger has switched to the low mode, and who
+/// hears about it.
+#[derive(Default)]
+struct DisplayModes {
+    low: Mutex<BTreeSet<DisplayId>>,
+    listener: Mutex<Option<FrameRateListener>>,
+}
+type SharedModes = Arc<DisplayModes>;
+
+impl DisplayModes {
+    fn is_low(&self, display: DisplayId) -> bool {
+        self.low.lock().is_ok_and(|low| low.contains(&display))
+    }
+
+    /// The configs one display offers: the host's rate, and 60 Hz below it.
+    fn configs(configure: Configure) -> binder::Result<Vec<(i32, u64)>> {
+        let mut configs = vec![(CONFIG_ID, configure_refresh_period(configure)?)];
+        if u64::from(configure.refresh_millihz) * 100 > u64::from(LOW_REFRESH_MILLIHZ) * 101 {
+            configs.push((
+                LOW_CONFIG_ID,
+                1_000_000_000_000_u64 / u64::from(LOW_REFRESH_MILLIHZ),
+            ));
+        }
+        Ok(configs)
+    }
+
+    fn config_period(configure: Configure, config: i32) -> binder::Result<u64> {
+        Self::configs(configure)?
+            .into_iter()
+            .find(|(id, _)| *id == config)
+            .map(|(_, period)| period)
+            .ok_or_else(|| service_error(ErrorCode::BadConfig))
+    }
+
+    fn active_config(&self, display: DisplayId, configure: Configure) -> binder::Result<i32> {
+        let low = self.is_low(display)
+            && Self::configs(configure)?
+                .iter()
+                .any(|(id, _)| *id == LOW_CONFIG_ID);
+        Ok(if low { LOW_CONFIG_ID } else { CONFIG_ID })
+    }
+
+    fn active_period(&self, display: DisplayId, configure: Configure) -> binder::Result<u64> {
+        Self::config_period(configure, self.active_config(display, configure)?)
+    }
+
+    /// Switch a display's mode; returns whether it changed.
+    fn set_active(&self, display: DisplayId, config: i32) -> binder::Result<bool> {
+        let mut low = lock(&self.low)?;
+        Ok(if config == LOW_CONFIG_ID {
+            low.insert(display)
+        } else {
+            low.remove(&display)
+        })
+    }
+
+    fn forget(&self, display: DisplayId) {
+        if let Ok(mut low) = self.low.lock() {
+            low.remove(&display);
+        }
+    }
+
+    fn announce(&self, display: DisplayId, millihz: u32) {
+        if let Ok(listener) = self.listener.lock() {
+            if let Some(listener) = listener.as_ref() {
+                listener(display, millihz);
+            }
+        }
+    }
+}
 type ConnectedDisplays = Arc<Mutex<BTreeSet<DisplayId>>>;
 
 /// SurfaceFlinger wakes one period minus its default 1 ms phase offset
@@ -581,6 +660,7 @@ pub struct ComposerLifecycle {
     connected: ConnectedDisplays,
     gate: Arc<Mutex<()>>,
     vsync: VsyncScheduler,
+    modes: SharedModes,
 }
 
 impl ComposerLifecycle {
@@ -664,6 +744,7 @@ impl ComposerLifecycle {
             .map_err(|_| service_error(ErrorCode::BadDisplay))?;
         let was_connected = lock(&self.connected)?.remove(&spec.display);
         self.vsync.disable(spec.display);
+        self.modes.forget(spec.display);
         if was_connected {
             let display =
                 i64::try_from(spec.display.0).map_err(|_| service_error(ErrorCode::BadDisplay))?;
@@ -680,6 +761,7 @@ impl ComposerLifecycle {
         let _gate = lock(&self.gate)?;
         let was_connected = lock(&self.connected)?.remove(&display);
         self.vsync.disable(display);
+        self.modes.forget(display);
         if was_connected {
             let aidl_display =
                 i64::try_from(display.0).map_err(|_| service_error(ErrorCode::BadDisplay))?;
@@ -705,7 +787,8 @@ impl ComposerLifecycle {
             .map_err(|_| service_error(ErrorCode::BadDisplay))?
             .latest_configure()
             .ok_or_else(|| service_error(ErrorCode::BadConfig))?;
-        self.vsync.update_period(display, configure_refresh_period(configure)?)?;
+        self.vsync
+            .update_period(display, self.modes.active_period(display, configure)?)?;
         let display = i64::try_from(display.0).map_err(|_| service_error(ErrorCode::BadDisplay))?;
         if let Some(callback) = lock(&self.callback)?.as_ref() {
             // SurfaceFlinger caches physical display modes. onRefresh alone
@@ -751,6 +834,7 @@ where
     connected: ConnectedDisplays,
     lifecycle_gate: Arc<Mutex<()>>,
     vsync: VsyncScheduler,
+    modes: SharedModes,
     client_active: Arc<AtomicBool>,
     marker: PhantomData<fn() -> A>,
 }
@@ -772,8 +856,16 @@ where
             connected: Arc::new(Mutex::new(BTreeSet::new())),
             lifecycle_gate: Arc::new(Mutex::new(())),
             vsync,
+            modes: SharedModes::default(),
             client_active: Arc::new(AtomicBool::new(false)),
             marker: PhantomData,
+        }
+    }
+
+    /// Hear the refresh rate SurfaceFlinger chooses for each task display.
+    pub fn set_frame_rate_listener(&self, listener: FrameRateListener) {
+        if let Ok(mut slot) = self.modes.listener.lock() {
+            *slot = Some(listener);
         }
     }
 
@@ -786,6 +878,7 @@ where
             connected: Arc::clone(&self.connected),
             gate: Arc::clone(&self.lifecycle_gate),
             vsync: self.vsync.clone(),
+            modes: Arc::clone(&self.modes),
         }
     }
 
@@ -821,6 +914,7 @@ where
             connected: Arc::clone(&self.connected),
             lifecycle_gate: Arc::clone(&self.lifecycle_gate),
             vsync: self.vsync.clone(),
+            modes: Arc::clone(&self.modes),
             lease: ClientLease(Arc::clone(&self.client_active)),
         };
         Ok(BnComposerClient::new_binder(
@@ -859,6 +953,7 @@ where
     connected: ConnectedDisplays,
     lifecycle_gate: Arc<Mutex<()>>,
     vsync: VsyncScheduler,
+    modes: SharedModes,
     lease: ClientLease,
 }
 
@@ -873,6 +968,28 @@ where
         self.vsync.clear();
         // `lease` is dropped immediately after this method.
         let _ = &self.lease;
+    }
+}
+
+impl<A> ComposerClient<A>
+where
+    A: NativeBufferAdapter + Send + 'static,
+{
+    /// Apply SurfaceFlinger's mode choice and tell the host its rate.
+    fn switch_config(&self, display: i64, config: i32) -> binder::Result<()> {
+        let configure = configured_display(&self.session, display)?;
+        let period = DisplayModes::config_period(configure, config)?;
+        let display = display_id(display)?;
+        if self.modes.set_active(display, config)? {
+            self.vsync.update_period(display, period)?;
+        }
+        let millihz = if config == LOW_CONFIG_ID {
+            LOW_REFRESH_MILLIHZ
+        } else {
+            configure.refresh_millihz
+        };
+        self.modes.announce(display, millihz);
+        Ok(())
     }
 }
 
@@ -946,8 +1063,8 @@ where
     }
 
     fn getActiveConfig(&self, display: i64) -> binder::Result<i32> {
-        configured_display(&self.session, display)?;
-        Ok(CONFIG_ID)
+        let configure = configured_display(&self.session, display)?;
+        self.modes.active_config(display_id(display)?, configure)
     }
 
     fn getColorModes(&self, display: i64) -> binder::Result<Vec<ColorMode>> {
@@ -965,8 +1082,8 @@ where
         config: i32,
         attribute: DisplayAttribute,
     ) -> binder::Result<i32> {
-        require_config(config)?;
         let configure = configured_display(&self.session, display)?;
+        let period = DisplayModes::config_period(configure, config)?;
         match attribute {
             DisplayAttribute::WIDTH => {
                 i32::try_from(configure.width).map_err(|_| service_error(ErrorCode::BadConfig))
@@ -974,7 +1091,9 @@ where
             DisplayAttribute::HEIGHT => {
                 i32::try_from(configure.height).map_err(|_| service_error(ErrorCode::BadConfig))
             }
-            DisplayAttribute::VSYNC_PERIOD => vsync_period(configure),
+            DisplayAttribute::VSYNC_PERIOD => {
+                i32::try_from(period).map_err(|_| service_error(ErrorCode::BadConfig))
+            }
             DisplayAttribute::DPI_X | DisplayAttribute::DPI_Y => Ok(UNKNOWN_DPI_MILLI),
             DisplayAttribute::CONFIG_GROUP => Ok(CONFIG_GROUP),
             _ => Err(service_error(ErrorCode::BadParameter)),
@@ -987,8 +1106,11 @@ where
     }
 
     fn getDisplayConfigs(&self, display: i64) -> binder::Result<Vec<i32>> {
-        configured_display(&self.session, display)?;
-        Ok(vec![CONFIG_ID])
+        let configure = configured_display(&self.session, display)?;
+        Ok(DisplayModes::configs(configure)?
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect())
     }
 
     fn getDisplayConnectionType(&self, display: i64) -> binder::Result<DisplayConnectionType> {
@@ -1019,7 +1141,9 @@ where
     }
 
     fn getDisplayVsyncPeriod(&self, display: i64) -> binder::Result<i32> {
-        vsync_period(configured_display(&self.session, display)?)
+        let configure = configured_display(&self.session, display)?;
+        i32::try_from(self.modes.active_period(display_id(display)?, configure)?)
+            .map_err(|_| service_error(ErrorCode::BadConfig))
     }
 
     fn getDisplayedContentSample(
@@ -1116,8 +1240,7 @@ where
     }
 
     fn setActiveConfig(&self, display: i64, config: i32) -> binder::Result<()> {
-        configured_display(&self.session, display)?;
-        require_config(config)
+        self.switch_config(display, config)
     }
 
     fn setActiveConfigWithConstraints(
@@ -1126,9 +1249,15 @@ where
         config: i32,
         _constraints: &VsyncPeriodChangeConstraints,
     ) -> binder::Result<VsyncPeriodChangeTimeline> {
-        configured_display(&self.session, display)?;
-        require_config(config)?;
-        unsupported()
+        self.switch_config(display, config)?;
+        // Applied at once: vsync follows the host's grants, and the host
+        // changes its own rate after hearing the new one.
+        Ok(VsyncPeriodChangeTimeline {
+            newVsyncAppliedTimeNanos: i64::try_from(monotonic_timestamp_nanos()?)
+                .map_err(|_| service_error(ErrorCode::BadConfig))?,
+            refreshRequired: false,
+            refreshTimeNanos: 0,
+        })
     }
 
     fn setBootDisplayConfig(&self, display: i64, _config: i32) -> binder::Result<()> {
@@ -1234,7 +1363,7 @@ where
                 .map_err(|_| service_error(ErrorCode::BadDisplay))?
                 .latest_configure()
                 .ok_or_else(|| service_error(ErrorCode::BadConfig))?;
-            configure_refresh_period(configure)?
+            self.modes.active_period(display, configure)?
         };
         self.vsync.set_enabled(display, enabled, period_nanos)
     }
@@ -1271,18 +1400,26 @@ where
         _max_frame_interval_ns: i32,
     ) -> binder::Result<Vec<DisplayConfiguration>> {
         let configure = configured_display(&self.session, display)?;
-        Ok(vec![DisplayConfiguration {
-            configId: CONFIG_ID,
-            width: i32::try_from(configure.width)
-                .map_err(|_| service_error(ErrorCode::BadConfig))?,
-            height: i32::try_from(configure.height)
-                .map_err(|_| service_error(ErrorCode::BadConfig))?,
-            dpi: None,
-            configGroup: CONFIG_GROUP,
-            vsyncPeriod: vsync_period(configure)?,
-            vrrConfig: None,
-            hdrOutputType: OutputType::SDR,
-        }])
+        let width =
+            i32::try_from(configure.width).map_err(|_| service_error(ErrorCode::BadConfig))?;
+        let height =
+            i32::try_from(configure.height).map_err(|_| service_error(ErrorCode::BadConfig))?;
+        DisplayModes::configs(configure)?
+            .into_iter()
+            .map(|(config_id, period)| {
+                Ok(DisplayConfiguration {
+                    configId: config_id,
+                    width,
+                    height,
+                    dpi: None,
+                    configGroup: CONFIG_GROUP,
+                    vsyncPeriod: i32::try_from(period)
+                        .map_err(|_| service_error(ErrorCode::BadConfig))?,
+                    vrrConfig: None,
+                    hdrOutputType: OutputType::SDR,
+                })
+            })
+            .collect()
     }
 
     fn notifyExpectedPresent(
@@ -1345,19 +1482,6 @@ fn configured_display(session: &SharedSession, value: i64) -> binder::Result<Con
         .map_err(|_| service_error(ErrorCode::BadDisplay))?
         .latest_configure()
         .ok_or_else(|| service_error(ErrorCode::BadConfig))
-}
-
-fn require_config(config: i32) -> binder::Result<()> {
-    if config == CONFIG_ID {
-        Ok(())
-    } else {
-        Err(service_error(ErrorCode::BadConfig))
-    }
-}
-
-fn vsync_period(configure: Configure) -> binder::Result<i32> {
-    i32::try_from(configure_refresh_period(configure)?)
-        .map_err(|_| service_error(ErrorCode::BadConfig))
 }
 
 fn configure_refresh_period(configure: Configure) -> binder::Result<u64> {

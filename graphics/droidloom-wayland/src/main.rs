@@ -1822,8 +1822,15 @@ impl App {
             EndpointAction::TimelinesBound { .. }
             | EndpointAction::ConfigureAcknowledged { .. }
             | EndpointAction::SupersededPresentDiscarded { .. }
-            | EndpointAction::Pong { .. }
-            | EndpointAction::SetFrameRate { .. } => {}
+            | EndpointAction::Pong { .. } => {}
+            EndpointAction::SetFrameRate { object, millihz } => {
+                let now = monotonic_timestamp_nanos()?;
+                self.tasks
+                    .get_mut(&object)
+                    .ok_or(PresenterError::UnknownTask(object))?
+                    .timeline
+                    .set_chosen_rate(now, millihz);
+            }
             EndpointAction::SetContentState { object, flags } => {
                 self.tasks
                     .get_mut(&object)

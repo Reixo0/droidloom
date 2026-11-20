@@ -1,0 +1,29 @@
+From: Reixo <125610085+Reixo0@users.noreply.github.com>
+Subject: [PATCH] SurfaceFlinger: measure layers that post without present times
+
+The layer heuristic only measured a layer's rate from presentation
+timestamps, and gave up with a Max vote when a layer had never had one.
+App UI layers post without them, so YouTube's hidden controls, redrawing
+at about 20 Hz under a fullscreen video, held the panel at 144 Hz. The
+rate is now measured from queue times when present times are missing.
+---
+diff --git a/services/surfaceflinger/Scheduler/LayerInfo.cpp b/services/surfaceflinger/Scheduler/LayerInfo.cpp
+index 3ff0050..753a74d 100644
+--- a/services/surfaceflinger/Scheduler/LayerInfo.cpp
++++ b/services/surfaceflinger/Scheduler/LayerInfo.cpp
+@@ -231,11 +231,10 @@ std::optional<nsecs_t> LayerInfo::calculateAverageFrameTime() const {
+     const bool isMissingPresentTime =
+             std::any_of(mFrameTimes.begin(), mFrameTimes.end(),
+                         [](auto frame) { return frame.presentTime == 0; });
+-    if (isMissingPresentTime && !mLastRefreshRate.reported.isValid()) {
+-        // If there are no presentation timestamps and we haven't calculated
+-        // one in the past then we can't calculate the refresh rate
+-        return std::nullopt;
+-    }
++    // Droidloom: an app's UI layer posts without presentation timestamps, so
++    // AOSP never measured it and voted Max. A UI redrawing at 20 Hz under a
++    // fullscreen video then held the panel at its highest rate. Measure such
++    // layers by queue time instead; input still boosts through its own vote.
+ 
+     // Calculate the average frame time based on presentation timestamps. If those
+     // doesn't exist, we look at the time the buffer was queued only. We can do that only if

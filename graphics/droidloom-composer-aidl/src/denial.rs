@@ -225,6 +225,29 @@ impl DenialPresentationSink {
         Ok(())
     }
 
+    /// Tell the host the refresh rate SurfaceFlinger chose for the task's
+    /// display. Only changes are sent; hosts that ignore it stay usable.
+    ///
+    /// # Errors
+    /// Returns unknown-display or transport errors.
+    pub fn set_frame_rate(&self, display: DisplayId, millihz: u32) -> Result<(), DenialSinkError> {
+        let mut tasks = self.lock_tasks()?;
+        let channel = tasks
+            .get_mut(&display)
+            .ok_or(DenialSinkError::UnknownDisplay(display))?;
+        if channel.frame_rate != millihz {
+            self.socket.send_android(
+                &AndroidMessage::SetFrameRate {
+                    object: channel.binding.object(),
+                    millihz,
+                },
+                &[],
+            )?;
+            channel.frame_rate = millihz;
+        }
+        Ok(())
+    }
+
     /// Tell the host whether a shown window of the task has Android's
     /// `FLAG_KEEP_SCREEN_ON`. Only changes are sent.
     ///
@@ -326,6 +349,7 @@ impl DenialPresentationSink {
                 keep_screen_on: false,
                 parent: None,
                 orientation: droidloom_denial_protocol::ORIENTATION_UNSPECIFIED,
+                frame_rate: 0,
                 surfaceflinger_present_fence: None,
                 headless_completion: None,
                 android_display_extent: None,
@@ -1124,6 +1148,8 @@ struct TaskChannel {
     parent: Option<TaskObjectId>,
     /// Last orientation sent to the host for this task.
     orientation: u32,
+    /// Last refresh rate (millihertz) sent to the host; 0 before any.
+    frame_rate: u32,
     /// SurfaceFlinger's GPU completion fence awaiting Composer3 present reply.
     surfaceflinger_present_fence: Option<std::os::fd::OwnedFd>,
     /// Dedicated completion timeline and last point for frames without GPU work.

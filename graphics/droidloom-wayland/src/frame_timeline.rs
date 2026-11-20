@@ -247,6 +247,11 @@ struct RateMeter {
     /// and release until shown.
     waiting: bool,
     last_report: Option<u64>,
+    /// The refresh rate SurfaceFlinger chose for the task's display, once
+    /// it has chosen. It knows its content (a 60 fps video, touch,
+    /// animations), so it replaces the guesses below: a 60 fps video at
+    /// 60 Hz waits for every grant just like a faster animation does.
+    chosen: Option<u32>,
 }
 impl RateMeter {
     fn report(&mut self, now: u64, millihz: u64) -> Option<u32> {
@@ -262,6 +267,9 @@ impl RateMeter {
     /// One Android frame was shown; returns the rate to report, if any.
     fn frame(&mut self, now: u64) -> Option<u32> {
         self.waiting = false;
+        if let Some(chosen) = self.chosen {
+            return self.chosen_report(now, chosen);
+        }
         let millihz = self.frames.note(now)?;
         (millihz >= FAST_CONTENT_MILLIHZ)
             .then(|| self.report(now, millihz))
@@ -269,12 +277,21 @@ impl RateMeter {
     }
     /// One Android frame waits for a grant; returns the rate to report.
     fn park(&mut self, now: u64) -> Option<u32> {
+        if let Some(chosen) = self.chosen {
+            return self.chosen_report(now, chosen);
+        }
         if std::mem::replace(&mut self.waiting, true) {
             return None;
         }
         let millihz = self.parks.note(now)?;
         (millihz >= FAST_PARK_MILLIHZ)
             .then(|| self.report(now, FAST_CONTENT_MILLIHZ))
+            .flatten()
+    }
+    /// A frame while SurfaceFlinger runs at `chosen`: fast when it is.
+    fn chosen_report(&mut self, now: u64, chosen: u32) -> Option<u32> {
+        (u64::from(chosen) >= FAST_CONTENT_MILLIHZ)
+            .then(|| self.report(now, u64::from(chosen)))
             .flatten()
     }
 }
@@ -350,6 +367,13 @@ impl Timeline {
     /// Counts one Android frame shown and reports fast content to Denial.
     pub fn note_frame(&mut self, now: u64) {
         let report = self.rate.frame(now);
+        self.report(report);
+    }
+    /// SurfaceFlinger chose `millihz` for the task's display; a fast choice
+    /// is reported at once, so the host is fast before the next frame.
+    pub fn set_chosen_rate(&mut self, now: u64, millihz: u32) {
+        self.rate.chosen = (millihz > 0).then_some(millihz);
+        let report = self.rate.chosen_report(now, millihz);
         self.report(report);
     }
     /// Counts one Android frame that waits for a grant.

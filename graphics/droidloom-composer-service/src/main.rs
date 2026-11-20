@@ -83,6 +83,12 @@ fn run() -> Result<(), String> {
         move || MinigbmBufferAdapter::new(factory_sink.clone()),
         capabilities & capability::HOST_CLOCK != 0,
     );
+    let rate_sink = sink.clone();
+    service.set_frame_rate_listener(Box::new(move |display, millihz| {
+        if let Err(error) = rate_sink.set_frame_rate(display, millihz) {
+            eprintln!("droidloom-composer: frame rate for {display:?}: {error}");
+        }
+    }));
     let lifecycle = service.lifecycle();
     let coordinator = TaskCoordinator::new(sink.clone(), lifecycle.clone());
     let input = InputHandoff::new(sink.clone(), INPUT_SOCKET);

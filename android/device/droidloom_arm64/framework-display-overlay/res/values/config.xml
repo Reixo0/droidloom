@@ -17,4 +17,8 @@
     <!-- The host mixer owns loudness: every Android stream stays at full
          scale, and Android ignores volume keys and apps that set a volume. -->
     <bool name="config_useFixedVolume">true</bool>
+    <!-- Task displays offer the host's rate and 60 Hz. No default cap:
+         SurfaceFlinger picks per content within the peak and minimum
+         settings, and the host follows its choice. -->
+    <integer name="config_defaultRefreshRate">0</integer>
 </resources>
