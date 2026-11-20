@@ -1,6 +1,9 @@
 /* Copyright 2026 Droidloom. SPDX-License-Identifier: GPL-3.0-or-later */
 package com.android.server.wm;
 
+import static android.app.WindowConfiguration.WINDOWING_MODE_FREEFORM;
+import static android.app.WindowConfiguration.WINDOWING_MODE_FULLSCREEN;
+import static android.view.WindowManager.TRANSIT_CHANGE;
 import static android.view.WindowManager.TRANSIT_TO_BACK;
 import static android.view.WindowManager.TRANSIT_TO_FRONT;
 import static android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON;
@@ -331,7 +334,13 @@ final class DroidloomTaskBackend {
                     if (command[5] <= 0 || command[5] > 16384
                             || command[6] <= 0 || command[6] > 16384) return;
                     final Rect bounds = new Rect(0, 0, (int) command[5], (int) command[6]);
-                    if (task.getBounds().equals(bounds)) return;
+                    // A window the host gives the whole screen, as the phone
+                    // layout gives every app, is a fullscreen task as on a
+                    // phone; it follows the display through rotations.
+                    final boolean fills = fillsDisplay(task.getDisplayContent(), bounds);
+                    setHostWindowingMode(task,
+                            fills ? WINDOWING_MODE_FULLSCREEN : WINDOWING_MODE_FREEFORM);
+                    if (fills || task.getBounds().equals(bounds)) break;
                     task.setResizeMode(ActivityInfo.RESIZE_MODE_RESIZEABLE);
                     // Direct call in system_server: preserve ATMS's existing
                     // Shell transition collection, configuration and surface crop.
@@ -409,6 +418,45 @@ final class DroidloomTaskBackend {
     }
 
     /**
+     * The host window covers the whole display, in either orientation: the
+     * display's rotation may reach Android before or after the window's size.
+     */
+    private static boolean fillsDisplay(DisplayContent display, Rect bounds) {
+        if (display == null || bounds == null) return false;
+        final Rect screen = display.getBounds();
+        return (bounds.width() == screen.width() && bounds.height() == screen.height())
+                || (bounds.width() == screen.height() && bounds.height() == screen.width());
+    }
+
+    /**
+     * Fullscreen tasks are alone on screen, as on a phone: apps are not in
+     * multi-window mode (a video player locks landscape for full screen) and
+     * the tasks behind stop. Other host windows are freeform tasks with the
+     * host's bounds.
+     */
+    private void setHostWindowingMode(Task task, int windowingMode) {
+        final Task root = task.getRootTask();
+        if (root == null || root.getWindowingMode() == windowingMode) return;
+        final ActionChain chain = mService.mChainTracker.startTransit("droidloom-host-windowing");
+        final TransitionController transitions = mService.getTransitionController();
+        final Transition transition = !chain.isCollecting()
+                && transitions.isShellTransitionsEnabled()
+                ? transitions.createTransition(TRANSIT_CHANGE) : null;
+        if (transition != null) {
+            chain.attachTransition(transition);
+            transition.setReady(root, true /* ready */);
+        }
+        chain.collect(root);
+        root.setWindowingMode(windowingMode);
+        if (transition != null) {
+            transitions.requestStartTransition(transition, root, null /* remote */, null /* display */);
+        }
+        mService.mRootWindowContainer.ensureActivitiesVisible();
+        mService.mRootWindowContainer.resumeFocusedTasksTopActivities();
+        mService.mChainTracker.end();
+    }
+
+    /**
      * A minimized host window stops its task, like leaving an app on a phone:
      * activities pause and stop, and stay stopped even if Android reorders tasks.
      * Restoring makes the task visible again; host focus brings it to the front.
@@ -447,7 +495,10 @@ final class DroidloomTaskBackend {
         return launch(intent, owner, user, bounds);
     }
 
-    /** Starts `intent` as a new freeform task of `owner` and publishes its window. */
+    /**
+     * Starts `intent` as a new task of `owner` and publishes its window: fullscreen when the
+     * host gives it the whole display, else freeform with the host's bounds.
+     */
     String launch(Intent intent, String owner, int user, Rect bounds) throws Exception {
         int uid = Binder.getCallingUid();
         int pid = Binder.getCallingPid();
@@ -457,8 +508,12 @@ final class DroidloomTaskBackend {
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
         ActivityOptions options = ActivityOptions.makeBasic();
         options.setLaunchDisplayId(0);
-        options.setLaunchWindowingMode(android.app.WindowConfiguration.WINDOWING_MODE_FREEFORM);
-        if (bounds != null) options.setLaunchBounds(bounds);
+        final boolean fills;
+        synchronized (mService.mGlobalLock) {
+            fills = fillsDisplay(mService.mRootWindowContainer.getDisplayContent(0), bounds);
+        }
+        options.setLaunchWindowingMode(fills ? WINDOWING_MODE_FULLSCREEN : WINDOWING_MODE_FREEFORM);
+        if (bounds != null && !fills) options.setLaunchBounds(bounds);
         WaitResult result = new WaitResult();
         ActivityRecord[] initial = new ActivityRecord[1];
         synchronized (mService.mGlobalLock) { mLaunches.put(result, null); }

@@ -1,0 +1,32 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Reixo <125610085+Reixo0@users.noreply.github.com>
+Date: Fri, 20 Nov 2026 17:30:00 +0100
+Subject: [PATCH] frameworks/base: no fixed-orientation letterbox for Droidloom's
+ fullscreen tasks
+
+Droidloom's display ignores orientation requests: the host turns it for
+the front app instead, as a phone turns for its front activity. Android
+letterboxed a fullscreen activity until then, as on a tablet, and apps
+such as YouTube gave up their landscape request at once. The activity
+now keeps the display's orientation until the host has turned it.
+
+---
+diff --git a/services/core/java/com/android/server/wm/ActivityRecord.java b/services/core/java/com/android/server/wm/ActivityRecord.java
+index bd5c72a6..e91204e9 100644
+--- a/services/core/java/com/android/server/wm/ActivityRecord.java
++++ b/services/core/java/com/android/server/wm/ActivityRecord.java
+@@ -8146,6 +8146,14 @@ final class ActivityRecord extends WindowToken {
+             // orientation with insets applied.
+             return;
+         }
++        // Droidloom: the host turns the display for a fullscreen task's requested
++        // orientation, as a phone does. Letterboxing in the meantime would show the app
++        // its orientation on a display that has not turned, as on a tablet, and apps
++        // such as video players give their request up there.
++        if (mAtmService.mDroidloomTasks != null && task != null
++                && task.getWindowingMode() == WINDOWING_MODE_FULLSCREEN) {
++            return;
++        }
+         // TODO(b/232898850): always respect fixed-orientation request.
+         // Ignore orientation request for activity in ActivityEmbedding split.
+         final TaskFragment organizedTf = getOrganizedTaskFragment();

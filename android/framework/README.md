@@ -108,6 +108,13 @@ replaces `generation` in `/data/vendor/droidloom-authentication` when the
 enrollment or its authenticator ID changes; the provider then enumerates again
 and reloads the authenticator IDs.
 
+`0010-droidloom-host-turns-fullscreen-tasks.patch` keeps fixed-orientation
+letterboxing off Droidloom's fullscreen tasks. Phone-layout apps are fullscreen
+tasks (the host gives them the whole display) on a display that ignores
+orientation requests: the host turns it for the front app's requested orientation,
+and until then the activity keeps the display's orientation, as on a phone.
+Letterboxed as on a tablet, apps such as YouTube gave up their landscape request.
+
 `DroidloomCredential` gives Android user 0 a random 32-character password that
 nobody types. The lifecycle daemon keeps it beside the cell's storage on the
 host, readable by root alone, and gives it to system_server at each start

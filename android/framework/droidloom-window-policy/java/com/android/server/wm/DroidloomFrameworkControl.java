@@ -71,6 +71,9 @@ public final class DroidloomFrameworkControl {
         String name = SystemProperties.get("ro.droidloom.device_name");
         if (!name.isEmpty()) Settings.Global.putString(context.getContentResolver(), Settings.Global.DEVICE_NAME, name);
         service.mWindowManager.setWindowingMode(0, android.app.WindowConfiguration.WINDOWING_MODE_FREEFORM);
+        // The host turns the display; fullscreen tasks must not turn it for
+        // their activities' requested orientation. The host follows those.
+        service.mWindowManager.setIgnoreOrientationRequest(0, true);
     }
     /**
      * Some apps read the density and font scale once per process and ignore later changes.

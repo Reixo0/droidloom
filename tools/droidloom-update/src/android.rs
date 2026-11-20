@@ -475,6 +475,10 @@ const PATCHES: &[(&str, &str)] = &[
         "frameworks/base",
         "android/framework/0009-droidloom-host-fingerprint-enrollment.patch",
     ),
+    (
+        "frameworks/base",
+        "android/framework/0010-droidloom-host-turns-fullscreen-tasks.patch",
+    ),
 ];
 #[derive(Serialize, Deserialize)]
 struct Original {
