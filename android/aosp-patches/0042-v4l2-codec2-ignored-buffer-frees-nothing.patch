@@ -1,0 +1,36 @@
+v4l2_codec2: an ignored capture buffer does not fetch a new frame
+
+When the driver hands back a capture buffer that is not at the device
+(0027 drops it), the loop still marked an output buffer as freed and
+posted tryFetchVideoFrame. Before the first resolution change there is
+no frame pool yet, so that failed the decoder ("mVideoFramePool is
+null"). YouTube restarts its decoder whenever it comes back to the
+front, hit this about once per switch, failed playback and started a
+new decoder, sometimes showing a green frame on the way. Only a buffer
+that was at the device now counts as freed.
+
+diff --git a/v4l2/V4L2Decoder.cpp b/v4l2/V4L2Decoder.cpp
+index 2d6bd13..6caeb60 100644
+--- a/v4l2/V4L2Decoder.cpp
++++ b/v4l2/V4L2Decoder.cpp
+@@ -686,8 +686,6 @@ void V4L2Decoder::serviceDeviceTask(bool event) {
+         }
+         if (!dequeuedBuffer) break;
+ 
+-        outputDequeued = true;
+-
+         const size_t bufferId = dequeuedBuffer->bufferId();
+         const int32_t bitstreamId = static_cast<int32_t>(dequeuedBuffer->getTimeStamp().tv_sec);
+         const size_t bytesUsed = dequeuedBuffer->getPlaneBytesUsed(0);
+@@ -704,6 +702,11 @@ void V4L2Decoder::serviceDeviceTask(bool event) {
+             ALOGW("Ignoring output buffer %zu that is not at the device", bufferId);
+             continue;
+         }
++        // Only a buffer that was at the device frees one for a new frame. An
++        // ignored one can come before the first resolution change, when there
++        // is no frame pool yet: fetching a frame then failed the decoder, and
++        // the app (YouTube coming back to the front) had to start it again.
++        outputDequeued = true;
+         auto frame = std::move(it->second);
+         mFrameAtDevice.erase(it);
+ 

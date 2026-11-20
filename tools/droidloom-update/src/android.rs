@@ -228,6 +228,10 @@ const PATCHES: &[(&str, &str)] = &[
         "android/aosp-patches/0041-v4l2-codec2-wait-for-last-before-resolution-change.patch",
     ),
     (
+        "external/v4l2_codec2",
+        "android/aosp-patches/0042-v4l2-codec2-ignored-buffer-frees-nothing.patch",
+    ),
+    (
         "frameworks/av",
         "android/audio/0001-host-buffered-playback.patch",
     ),
@@ -398,6 +402,10 @@ const PATCHES: &[(&str, &str)] = &[
     (
         "frameworks/native",
         "android/surfaceflinger/0039-droidloom-video-off-grid-and-batched-imports.patch",
+    ),
+    (
+        "frameworks/native",
+        "android/surfaceflinger/0040-droidloom-hold-scene-while-importing.patch",
     ),
     (
         "frameworks/native",

@@ -1,0 +1,165 @@
+From: Reixo <125610085+Reixo0@users.noreply.github.com>
+Subject: [PATCH] SurfaceFlinger: keep the direct scene while app buffers import
+
+An app window shown again after its app stopped (on the phone every app
+behind the front one stops) brings new buffers, each new to the host for
+its first use. A scene with a pending non-video import was composed, and
+the next one placed directly again, so direct and composed presentation
+alternated over the whole window: skipped frames after every app switch,
+and after rotations. The host now keeps showing the direct scene while
+such imports are pending, for up to 100 ms; the import completion
+repaints. A video layer keeps its own last frame where it can; otherwise the
+whole scene is held too, as composing cost about 100 ms of composed
+frames before the scene settled direct again. And a scene composed for
+any reason but movement (off the pixel grid, refused by the host) goes
+direct at once instead of waiting 100 ms for its shape to settle: an app
+coming back composed for 100 ms or more, and composing a new video's
+buffers made those frames late.
+---
+diff --git a/services/surfaceflinger/DroidloomLayers.cpp b/services/surfaceflinger/DroidloomLayers.cpp
+index 2387a90..9d3c69f 100644
+--- a/services/surfaceflinger/DroidloomLayers.cpp
++++ b/services/surfaceflinger/DroidloomLayers.cpp
+@@ -176,6 +176,9 @@ std::vector<uint64_t> sceneShape(std::vector<uint64_t> scene) {
+ // Once composed, a scene asks for direct placement again only after its shape
+ // has held for kSettleNs.
+ constexpr int64_t kSettleNs = 100'000'000;
++// How long the host keeps showing a direct scene while the next one's new
++// buffers import, before that scene is composed instead.
++constexpr int64_t kHoldImportsNs = 100'000'000;
+ class ShapeSettle {
+     std::vector<uint64_t> mShape;
+     int64_t mSince = 0;
+@@ -758,7 +761,10 @@ bool DroidloomLayers::presentFrame(compositionengine::Output& output, uint32_t w
+         if (mState->commits.defer()) return true;
+         bool unplaceable = false;
+         if (mState->commits.takeFallback(&unplaceable)) {
+-            if (unplaceable) mUnplaceable = sceneShape(mScene);
++            if (unplaceable) {
++                mUnplaceable = sceneShape(mScene);
++                mMoved = true;
++            }
+             // A retry often only means the host dropped the wait for its
+             // frame slot (a new frame timeline epoch, say). Composing for it
+             // hides and reshows the video, which blinks; send the same scene
+@@ -883,16 +889,25 @@ bool DroidloomLayers::presentFrame(compositionengine::Output& output, uint32_t w
+         if (e.representation) continue;
+         const auto& d = e.destination;
+         if (!onLogicalGrid({d.left, d.top, d.right, d.bottom}, logical, width, height)) {
++            mMoved = true;
+             return false;
+         }
+     }
+     // Also an arrangement it refused, until its layers, size or configure change.
+     if (!mUnplaceable.empty()) {
+-        if (sceneShape(scene) == mUnplaceable) return false;
++        if (sceneShape(scene) == mUnplaceable) {
++            mMoved = true;
++            return false;
++        }
+         mUnplaceable.clear();
+     }
+-    // A composed scene stays composed while it moves.
+-    if (mScene.empty() && !settled) return false;
++    // A scene composed because it moved (off the pixel grid, or refused by
++    // the host) stays composed while it moves. Composed for any other reason,
++    // such as a window shown again before the host configured it, it goes
++    // direct at once: an app coming back used to compose for 100 ms or more
++    // while its layout changed, and composing a new video's buffers made
++    // those frames late (skipped frames over the whole window).
++    if (mScene.empty() && mMoved && !settled) return false;
+     // A release can wake an otherwise unchanged scene solely to retire imports.
+     // Do not reattach buffers or create new reads for that cleanup.
+     if (scene == mScene) return true;
+@@ -957,26 +972,48 @@ bool DroidloomLayers::presentFrame(compositionengine::Output& output, uint32_t w
+             // showing the previous frame directly: the import completion
+             // recomposes at once, so that frame arrives a few ms late instead.
+             if (mScene.empty()) return false;
++            bool holdScene = false;
+             for (auto& e : exports) {
+                 const auto status = mState->imports.status(e.import);
+                 if (status == ImportQueue::Status::Ready) continue;
+                 // A failed import composes, as any other layer. One still
+                 // waiting for a slot in the import batch is held like a
+                 // pending one: the batch completion recomposes.
+-                if (!e.representation || status == ImportQueue::Status::Failed) return false;
++                if (status == ImportQueue::Status::Failed) return false;
++                // An app window's new buffers (a window shown again after its
++                // app stopped, say) import for a few ms each. Composing each
++                // such frame and placing the next directly again alternated
++                // the two, seen as skipped frames over the whole window.
++                // The host keeps the scene it shows until they are ready.
++                if (!e.representation) {
++                    holdScene = true;
++                    continue;
++                }
+                 const auto last = mState->lastVideo.find(e.id);
+                 const auto old = mLayers.find(e.id);
+                 // Hold only a frame whose host read is still open: its buffer
+-                // has not gone back to the decoder.
++                // has not gone back to the decoder. Otherwise the host keeps
++                // the whole scene it shows, whose reads are all still open:
++                // composing here cost about 100 ms of composed frames before
++                // the scene settled direct again.
+                 if (last == mState->lastVideo.end() || old == mLayers.end() ||
+                     old->second.buffer != last->second.import ||
+                     old->second.frame != last->second.frame ||
+                     !mState->pending.contains(old->second.ticket) ||
+                     !mBuffers.contains(last->second.import) ||
+-                    mState->imports.status(last->second.import) != ImportQueue::Status::Ready)
+-                    return false;
++                    mState->imports.status(last->second.import) != ImportQueue::Status::Ready) {
++                    holdScene = true;
++                    continue;
++                }
+                 e = last->second;
+             }
++            if (holdScene) {
++                const int64_t now = systemTime(SYSTEM_TIME_MONOTONIC);
++                if (!mHoldSince) mHoldSince = now;
++                if (now - mHoldSince < kHoldImportsNs) return true;
++                mHoldSince = 0;
++                return false;
++            }
+             buffers.clear();
+             for (const auto& e : exports)
+                 if (e.buffer) buffers.insert(e.import);
+@@ -985,6 +1022,7 @@ bool DroidloomLayers::presentFrame(compositionengine::Output& output, uint32_t w
+             if (scene == mScene) return true;
+         }
+     }
++    mHoldSince = 0;
+     const auto rememberVideo = [&] {
+         auto& lastVideo = mState->lastVideo;
+         lastVideo.clear();
+@@ -1079,6 +1117,7 @@ bool DroidloomLayers::presentFrame(compositionengine::Output& output, uint32_t w
+         }
+         mLayers = std::move(next);
+         mScene = std::move(scene);
++        mMoved = false;
+         rememberVideo();
+         return true;
+     }
+@@ -1101,6 +1140,7 @@ bool DroidloomLayers::presentFrame(compositionengine::Output& output, uint32_t w
+     }
+     mLayers = std::move(next);
+     mScene = std::move(scene);
++    mMoved = false;
+     rememberVideo();
+     return true;
+ }
+diff --git a/services/surfaceflinger/DroidloomLayers.h b/services/surfaceflinger/DroidloomLayers.h
+index 6503bd9..aee047e 100644
+--- a/services/surfaceflinger/DroidloomLayers.h
++++ b/services/surfaceflinger/DroidloomLayers.h
+@@ -64,6 +64,10 @@ class DroidloomLayers {
+     uint64_t mNextTicket = 0;
+     uint64_t mCacheSerial = 0;
+     bool mRetireOnRelease = false;
++    // Since when a scene waits for its new imports (0: not waiting).
++    int64_t mHoldSince = 0;
++    // The scene was last composed because it moved: it waits to settle.
++    bool mMoved = false;
+     bool mSubscribed = false;
+     bool transact(uint32_t opcode, const std::vector<uint8_t>& payload,
+                   const std::vector<int>& fds = {});
