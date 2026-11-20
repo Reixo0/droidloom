@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<protocol name="denial_orientation_v1">
+  <copyright>
+    Copyright 2026 Denial contributors
+    SPDX-License-Identifier: MIT
+  </copyright>
+  <interface name="denial_orientation_manager_v1" version="1">
+    <description summary="an application window's preferred display orientation">
+      On Denial's mobile shell the display follows the orientation sensor and
+      the user's rotation lock. An application toplevel may ask for an
+      orientation instead, as an Android activity does with its requested
+      orientation: a game that only works in landscape turns the display to
+      landscape while it is the front window, whatever the lock says.
+
+      The shell honours the request of the front application window only,
+      and never while the home or lock screen is shown. Desktop layout is
+      unaffected. The request is a preference: the shell may ignore it, for
+      example on a display that does not rotate.
+    </description>
+    <enum name="error">
+      <entry name="invalid_orientation" value="1"
+             summary="the orientation is not a value of the orientation enum"/>
+    </enum>
+    <enum name="orientation">
+      <entry name="unspecified" value="0"
+             summary="follow the rotation lock, or the sensor when unlocked"/>
+      <entry name="portrait" value="1"
+             summary="the display's natural portrait orientation"/>
+      <entry name="landscape" value="2"
+             summary="landscape, always on the same side"/>
+      <entry name="sensor_landscape" value="3"
+             summary="landscape, the side chosen by the sensor"/>
+      <entry name="sensor" value="4"
+             summary="follow the sensor, even when the rotation is locked"/>
+      <entry name="locked" value="5"
+             summary="keep the orientation the display has now"/>
+    </enum>
+    <request name="set_orientation">
+      <description summary="set the preferred orientation of a toplevel">
+        Set the orientation the display should take while this application
+        toplevel is the front window. It takes effect immediately rather
+        than on wl_surface.commit, may be sent at any time and lasts for the
+        wl_surface lifetime, including unmap and remap, until it is set
+        again. Destroying this manager does not undo it. Surfaces that are
+        not toplevels are ignored.
+      </description>
+      <arg name="surface" type="object" interface="wl_surface"/>
+      <arg name="orientation" type="uint" enum="orientation"/>
+    </request>
+    <request name="destroy" type="destructor">
+      <description summary="release this manager binding">
+        Orientations already set remain in effect.
+      </description>
+    </request>
+  </interface>
+</protocol>

@@ -18,7 +18,13 @@ pub const MAGIC: [u8; 4] = *b"DLTC";
 /// Supported protocol major.
 pub const PROTOCOL_MAJOR: u16 = 3;
 /// Supported protocol minor.
-pub const PROTOCOL_MINOR: u16 = 5;
+pub const PROTOCOL_MINOR: u16 = 6;
+
+/// A framework publication's orientation sits in bits 2-4 of its flags.
+const ORIENTATION_SHIFT: u32 = 2;
+const ORIENTATION_MASK: u32 = 0b111;
+/// The highest orientation value (`ORIENTATION_LOCKED`).
+const MAX_ORIENTATION: u32 = 5;
 /// Fixed bytes before the opcode-specific payload.
 pub const HEADER_BYTES: usize = 24;
 /// Maximum complete task-control record.
@@ -67,6 +73,9 @@ pub enum ControlRequest {
         /// The task this one opened over and leaves running, such as the app
         /// behind a dialog; 0 for none (protocol 3.5).
         parent: u64,
+        /// The display orientation its front activity asks for, one of
+        /// `droidloom_denial_protocol`'s `ORIENTATION_*` values (protocol 3.6).
+        orientation: u32,
     },
     /// Become the framework's host-window command receiver (protocol 3.2).
     Subscribe {
@@ -279,6 +288,7 @@ pub fn encode_request(request: &ControlRequest) -> Result<Vec<u8>, CodecError> {
             activate,
             keep_screen_on,
             parent,
+            orientation,
         } => {
             nonzero("request identity", *request_id)?;
             nonzero("task identity", *task)?;
@@ -289,11 +299,16 @@ pub fn encode_request(request: &ControlRequest) -> Result<Vec<u8>, CodecError> {
             if *parent == *task || *parent > i32::MAX as u64 {
                 return Err(CodecError::InvalidValue("parent task"));
             }
+            if *orientation > MAX_ORIENTATION {
+                return Err(CodecError::InvalidValue("task orientation"));
+            }
             payload.string(package, MAX_PACKAGE_BYTES)?;
             payload.u64(*task);
             payload.u32(*android_display);
             payload.u64(*incarnation);
-            payload.u32(u32::from(*activate) | u32::from(*keep_screen_on) << 1);
+            payload.u32(
+                u32::from(*activate) | u32::from(*keep_screen_on) << 1 | *orientation << ORIENTATION_SHIFT,
+            );
             payload.u64(*parent);
             (OP_PUBLISH_FRAMEWORK, *request_id)
         }
@@ -468,7 +483,11 @@ pub fn decode_request(record: &[u8]) -> Result<ControlRequest, CodecError> {
             };
             // Bit 0 activates; framework publications add bit 1, keep screen on.
             let flags = payload.u32()?;
-            let known = if incarnation.is_some() { 0b11 } else { 0b1 };
+            let known = if incarnation.is_some() {
+                0b11 | ORIENTATION_MASK << ORIENTATION_SHIFT
+            } else {
+                0b1
+            };
             if flags & !known != 0 {
                 return Err(CodecError::InvalidValue("activation flags"));
             }
@@ -487,6 +506,13 @@ pub fn decode_request(record: &[u8]) -> Result<ControlRequest, CodecError> {
                     activate,
                     keep_screen_on: flags & 0b10 != 0,
                     parent,
+                    orientation: {
+                        let orientation = flags >> ORIENTATION_SHIFT & ORIENTATION_MASK;
+                        if orientation > MAX_ORIENTATION {
+                            return Err(CodecError::InvalidValue("task orientation"));
+                        }
+                        orientation
+                    },
                 }
             } else {
                 ControlRequest::PublishDirect {
@@ -1021,13 +1047,39 @@ mod tests {
                 activate,
                 keep_screen_on,
                 parent: 0,
+                orientation: 0,
             };
             let mut bytes = super::encode_request(&request).unwrap();
             assert_eq!(super::decode_request(&bytes).unwrap(), request);
             let flags = bytes.len() - 12;
-            bytes[flags..flags + 4].copy_from_slice(&4_u32.to_le_bytes());
+            bytes[flags..flags + 4].copy_from_slice(&(1_u32 << 5).to_le_bytes());
             assert!(super::decode_request(&bytes).is_err());
         }
+    }
+
+    #[test]
+    fn framework_publication_carries_its_orientation() {
+        let request = |orientation| super::ControlRequest::PublishFramework {
+            request_id: 7,
+            package: "org.example.app".into(),
+            task: 42,
+            android_display: 0,
+            incarnation: 9,
+            activate: true,
+            keep_screen_on: true,
+            parent: 0,
+            orientation,
+        };
+        for orientation in 0..=MAX_ORIENTATION {
+            let bytes = super::encode_request(&request(orientation)).unwrap();
+            assert_eq!(super::decode_request(&bytes).unwrap(), request(orientation));
+        }
+        assert!(super::encode_request(&request(MAX_ORIENTATION + 1)).is_err());
+        let mut bytes = super::encode_request(&request(0)).unwrap();
+        let flags = bytes.len() - 12;
+        let invalid = 0b11 | (MAX_ORIENTATION + 1) << ORIENTATION_SHIFT;
+        bytes[flags..flags + 4].copy_from_slice(&invalid.to_le_bytes());
+        assert!(super::decode_request(&bytes).is_err());
     }
 
     #[test]
@@ -1041,6 +1093,7 @@ mod tests {
             activate: true,
             keep_screen_on: false,
             parent,
+            orientation: 0,
         };
         for parent in [0, 7] {
             let bytes = super::encode_request(&request(parent)).unwrap();
@@ -1085,6 +1138,7 @@ mod tests {
                 activate: false,
                 keep_screen_on: true,
                 parent: 7,
+                orientation: 3,
             },
             ControlRequest::Hello {
                 min_major: 1,

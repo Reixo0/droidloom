@@ -161,6 +161,13 @@ pub enum EndpointAction {
         /// Existing parent task, or `None`.
         parent: Option<TaskObjectId>,
     },
+    /// The display orientation the task's front activity asks for.
+    SetOrientation {
+        /// Existing task object.
+        object: TaskObjectId,
+        /// One of the protocol's `ORIENTATION_*` values.
+        orientation: u32,
+    },
     /// Android answered a host liveness probe.
     Pong {
         /// Cookie from the corresponding `Ping`.
@@ -346,6 +353,7 @@ pub struct DenialEndpoint {
     keep_screen_on: bool,
     task_density: bool,
     task_parents: bool,
+    task_orientation: bool,
     tasks: BTreeMap<TaskObjectId, TaskEndpoint>,
 }
 
@@ -372,6 +380,7 @@ impl DenialEndpoint {
             keep_screen_on: false,
             task_density: false,
             task_parents: false,
+            task_orientation: false,
             tasks: BTreeMap::new(),
         }
     }
@@ -576,6 +585,19 @@ impl DenialEndpoint {
                 // A parent that closed meanwhile is no parent.
                 let parent = parent.filter(|parent| self.tasks.contains_key(parent));
                 Ok(EndpointAction::SetParent { object, parent })
+            }
+            AndroidMessage::SetOrientation {
+                object,
+                orientation,
+            } => {
+                if !self.task_orientation {
+                    return Err(EndpointError::IncompatibleClient);
+                }
+                self.task(object)?;
+                Ok(EndpointAction::SetOrientation {
+                    object,
+                    orientation,
+                })
             }
             AndroidMessage::Pong { cookie } => Ok(EndpointAction::Pong { cookie }),
         }
@@ -902,6 +924,12 @@ impl DenialEndpoint {
         self
     }
 
+    /// Opt in when the host follows the orientation each task asks for.
+    pub fn with_task_orientation(mut self) -> Self {
+        self.task_orientation = true;
+        self
+    }
+
     /// Opt in when the host gives each task its output's density.
     pub fn with_task_density(mut self) -> Self {
         self.task_density = true;
@@ -1073,10 +1101,13 @@ impl DenialEndpoint {
         self.keep_screen_on &= capabilities & capability::KEEP_SCREEN_ON != 0;
         self.task_density &= capabilities & capability::TASK_DENSITY != 0;
         self.task_parents &= capabilities & capability::TASK_PARENTS != 0;
+        self.task_orientation &= capabilities & capability::TASK_ORIENTATION != 0;
         self.socket.send_denial(&DenialMessage::ServerHello {
             major: PROTOCOL_MAJOR,
-            minor: if self.task_parents {
+            minor: if self.task_orientation {
                 PROTOCOL_MINOR
+            } else if self.task_parents {
+                12
             } else if self.task_density {
                 11
             } else if self.keep_screen_on {
@@ -1123,6 +1154,11 @@ impl DenialEndpoint {
                 }
                 | if self.task_parents {
                     capability::TASK_PARENTS
+                } else {
+                    0
+                }
+                | if self.task_orientation {
+                    capability::TASK_ORIENTATION
                 } else {
                     0
                 }

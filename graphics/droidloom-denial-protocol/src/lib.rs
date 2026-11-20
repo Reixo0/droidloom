@@ -20,7 +20,7 @@ pub const MAGIC: [u8; 4] = *b"DLOM";
 /// Protocol major implemented by this crate.
 pub const PROTOCOL_MAJOR: u16 = 1;
 /// Protocol minor implemented by this crate.
-pub const PROTOCOL_MINOR: u16 = 12;
+pub const PROTOCOL_MINOR: u16 = 13;
 /// Wire version retained by existing records, including initial negotiation.
 pub const BASE_PROTOCOL_MINOR: u16 = 3;
 /// Wire version introducing task activation.
@@ -80,6 +80,8 @@ pub mod capability {
     pub const TASK_DENSITY: u64 = 1 << 15;
     /// Android names the task a dialog-like task opened over.
     pub const TASK_PARENTS: u64 = 1 << 16;
+    /// Android tells the host the display orientation each task asks for.
+    pub const TASK_ORIENTATION: u64 = 1 << 17;
 
     /// Capabilities required for every protocol-v1 session.
     pub const REQUIRED_V1: u64 = TASK_WINDOWS
@@ -278,6 +280,14 @@ pub enum AndroidMessage {
         object: TaskObjectId,
         /// Parent task, or `None` when the task has none.
         parent: Option<TaskObjectId>,
+    },
+    /// The display orientation the task's front activity asks for, as one of
+    /// the `ORIENTATION_*` values. Requires negotiated `TASK_ORIENTATION`.
+    SetOrientation {
+        /// Owning task.
+        object: TaskObjectId,
+        /// One of the `ORIENTATION_*` values.
+        orientation: u32,
     },
     /// Answer a host liveness probe.
     Pong {
@@ -1242,6 +1252,22 @@ const OP_BIND_INPUT_ROUTE: u16 = 0x0010;
 const OP_REQUEST_RENDER_TARGETS: u16 = 0x0011;
 const OP_SET_KEEP_SCREEN_ON: u16 = 0x0012;
 const OP_SET_PARENT: u16 = 0x0013;
+const OP_SET_ORIENTATION: u16 = 0x0014;
+
+// Task orientations: the values of Denial's `denial_orientation_manager_v1`
+// orientation enum.
+/// Follow the host's rotation lock, or its sensor when unlocked.
+pub const ORIENTATION_UNSPECIFIED: u32 = 0;
+/// The display's natural portrait orientation.
+pub const ORIENTATION_PORTRAIT: u32 = 1;
+/// Landscape, always on the same side.
+pub const ORIENTATION_LANDSCAPE: u32 = 2;
+/// Landscape, the side chosen by the sensor.
+pub const ORIENTATION_SENSOR_LANDSCAPE: u32 = 3;
+/// Follow the sensor, even when the rotation is locked.
+pub const ORIENTATION_SENSOR: u32 = 4;
+/// Keep the orientation the display has now.
+pub const ORIENTATION_LOCKED: u32 = 5;
 
 const OP_SERVER_HELLO: u16 = 0x8001;
 const OP_FORMAT_FEEDBACK: u16 = 0x8002;
@@ -1457,6 +1483,19 @@ pub fn encode_android(message: &AndroidMessage) -> Result<EncodedPacket, WireErr
             };
             payload.u64(parent);
             (OP_SET_PARENT, valid_object(*object)?, Vec::new())
+        }
+        AndroidMessage::SetOrientation {
+            object,
+            orientation,
+        } => {
+            if *orientation > ORIENTATION_LOCKED {
+                return Err(WireError::InvalidEnum {
+                    field: "task orientation",
+                    value: u64::from(*orientation),
+                });
+            }
+            payload.u32(*orientation);
+            (OP_SET_ORIENTATION, valid_object(*object)?, Vec::new())
         }
         AndroidMessage::Pong { cookie } => {
             payload.u64(*cookie);
@@ -1710,6 +1749,23 @@ pub fn decode_android(
                 }
             };
             (AndroidMessage::SetParent { object, parent }, Vec::new())
+        }
+        OP_SET_ORIENTATION => {
+            valid_object(object)?;
+            let orientation = payload.u32()?;
+            if orientation > ORIENTATION_LOCKED {
+                return Err(WireError::InvalidEnum {
+                    field: "task orientation",
+                    value: u64::from(orientation),
+                });
+            }
+            (
+                AndroidMessage::SetOrientation {
+                    object,
+                    orientation,
+                },
+                Vec::new(),
+            )
         }
         OP_PONG => {
             require_connection(header.object)?;
@@ -2386,6 +2442,7 @@ fn finish_packet(
         OP_SET_KEEP_SCREEN_ON => 10,
         OP_DENSITY => 11,
         OP_SET_PARENT => 12,
+        OP_SET_ORIENTATION => 13,
         _ => BASE_PROTOCOL_MINOR,
     };
     bytes.extend_from_slice(&minor.to_le_bytes());
@@ -2953,10 +3010,25 @@ mod tests {
                 object: OBJECT,
                 parent: None,
             },
+            AndroidMessage::SetOrientation {
+                object: OBJECT,
+                orientation: ORIENTATION_SENSOR_LANDSCAPE,
+            },
             AndroidMessage::Pong { cookie: 99 },
         ] {
             round_trip_android(&message);
         }
+    }
+
+    #[test]
+    fn task_orientation_rejects_unknown_values() {
+        assert!(
+            encode_android(&AndroidMessage::SetOrientation {
+                object: OBJECT,
+                orientation: ORIENTATION_LOCKED + 1,
+            })
+            .is_err()
+        );
     }
 
     #[test]

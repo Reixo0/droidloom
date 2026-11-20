@@ -115,6 +115,7 @@ pub struct DenialPresentationSink {
     lazy_render_targets: bool,
     keep_screen_on: bool,
     task_parents: bool,
+    task_orientation: bool,
 }
 
 impl DenialPresentationSink {
@@ -129,6 +130,7 @@ impl DenialPresentationSink {
             lazy_render_targets: false,
             keep_screen_on: false,
             task_parents: false,
+            task_orientation: false,
         }
     }
 
@@ -158,6 +160,39 @@ impl DenialPresentationSink {
     pub fn with_task_parents(mut self, enabled: bool) -> Self {
         self.task_parents = enabled;
         self
+    }
+
+    /// Record whether this host follows the orientation a task asks for.
+    #[must_use]
+    pub fn with_task_orientation(mut self, enabled: bool) -> Self {
+        self.task_orientation = enabled;
+        self
+    }
+
+    /// Tell the host the display orientation the task's front activity asks
+    /// for, one of the protocol's `ORIENTATION_*` values. Only changes are sent.
+    ///
+    /// # Errors
+    /// Returns unknown-display or transport errors; older hosts remain usable.
+    pub fn set_orientation(&self, display: DisplayId, orientation: u32) -> Result<(), DenialSinkError> {
+        if !self.task_orientation {
+            return Ok(());
+        }
+        let mut tasks = self.lock_tasks()?;
+        let channel = tasks
+            .get_mut(&display)
+            .ok_or(DenialSinkError::UnknownDisplay(display))?;
+        if channel.orientation != orientation {
+            self.socket.send_android(
+                &AndroidMessage::SetOrientation {
+                    object: channel.binding.object(),
+                    orientation,
+                },
+                &[],
+            )?;
+            channel.orientation = orientation;
+        }
+        Ok(())
     }
 
     /// Tell the host which task this one opened over and leaves running.
@@ -290,6 +325,7 @@ impl DenialPresentationSink {
                 content_opaque: None,
                 keep_screen_on: false,
                 parent: None,
+                orientation: droidloom_denial_protocol::ORIENTATION_UNSPECIFIED,
                 surfaceflinger_present_fence: None,
                 headless_completion: None,
                 android_display_extent: None,
@@ -1086,6 +1122,8 @@ struct TaskChannel {
     keep_screen_on: bool,
     /// Last parent task sent to the host for this task.
     parent: Option<TaskObjectId>,
+    /// Last orientation sent to the host for this task.
+    orientation: u32,
     /// SurfaceFlinger's GPU completion fence awaiting Composer3 present reply.
     surfaceflinger_present_fence: Option<std::os::fd::OwnedFd>,
     /// Dedicated completion timeline and last point for frames without GPU work.

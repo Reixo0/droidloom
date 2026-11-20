@@ -12,6 +12,7 @@ mod imports;
 mod input;
 mod input_time;
 mod insets;
+mod orientation;
 mod layers;
 mod notifications;
 mod presentation_audit;
@@ -348,6 +349,7 @@ struct App {
     compositor: CompositorState,
     xdg_shell: XdgShell,
     insets_manager: Option<insets::DenialInsetsManagerV1>,
+    orientation_manager: Option<orientation::DenialOrientationManagerV1>,
     frame_timeline_manager: Option<frame_timeline::Manager>,
     clock: clock::Clock,
     viewporter: WpViewporter,
@@ -1774,6 +1776,24 @@ impl App {
                     window.xdg_toplevel().set_parent(parent.as_ref());
                 }
             }
+            EndpointAction::SetOrientation {
+                object,
+                orientation,
+            } => {
+                // Denial turns the display for the front window's request,
+                // as Android does for its front activity.
+                let task = self
+                    .tasks
+                    .get(&object)
+                    .ok_or(PresenterError::UnknownTask(object))?;
+                if let (Some(manager), Some(window), Ok(orientation)) = (
+                    &self.orientation_manager,
+                    task.window.as_ref().filter(|_| !task.closing),
+                    orientation::Orientation::try_from(orientation),
+                ) {
+                    manager.set_orientation(window.wl_surface(), orientation);
+                }
+            }
             EndpointAction::RequestActivation { object } => {
                 if self.focused != Some(object)
                     && let Some(task) = self
@@ -1865,6 +1885,11 @@ impl App {
                     .with_task_parents();
                 let endpoint = if self.idle_inhibit_manager.is_some() {
                     endpoint.with_keep_screen_on()
+                } else {
+                    endpoint
+                };
+                let endpoint = if self.orientation_manager.is_some() {
+                    endpoint.with_task_orientation()
                 } else {
                     endpoint
                 };
@@ -3401,6 +3426,7 @@ fn run() -> Result<(), PresenterError> {
         compositor,
         xdg_shell,
         insets_manager: globals.bind(&qh, 1..=1, ()).ok(),
+        orientation_manager: globals.bind(&qh, 1..=1, ()).ok(),
         frame_timeline_manager: globals.bind(&qh, 1..=2, ()).ok(),
         clock: clock::Clock::new(),
         viewporter,

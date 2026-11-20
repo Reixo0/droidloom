@@ -26,6 +26,9 @@ pub struct Task {
     /// The task this one opened over and leaves running, such as the app
     /// behind a dialog; 0 for none.
     pub parent: u64,
+    /// The display orientation its front activity asks for, one of
+    /// `droidloom_denial_protocol`'s `ORIENTATION_*` values.
+    pub orientation: u32,
 }
 
 impl Task {
@@ -351,6 +354,7 @@ impl Backend {
             activate,
             keep_screen_on: task.keep_screen_on,
             parent: task.parent,
+            orientation: task.orientation,
         })? {
             ControlResponse::Bound {
                 request_id: actual,
@@ -467,6 +471,7 @@ mod tests {
             incarnation,
             keep_screen_on,
             parent,
+            ..
         } = receive(socket)
         else {
             panic!("expected registration")
@@ -503,6 +508,7 @@ mod tests {
             package: "org.example.app".into(),
             keep_screen_on: false,
             parent: 0,
+            orientation: 0,
         }
     }
 

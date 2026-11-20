@@ -64,7 +64,7 @@ final class DroidloomTaskBackend {
 
     private static final class Snapshot {
         final Task token;
-        final int id, user, display, parent;
+        final int id, user, display, parent, orientation;
         final long incarnation;
         final String owner;
         final boolean ready, focused, hostFocused, keepScreenOn;
@@ -80,6 +80,7 @@ final class DroidloomTaskBackend {
             inputToken = top == null || top.isNoDisplay() || bounds.isEmpty() ? null
                     : top.getInputApplicationHandle(false).token;
             ready = task.isVisibleRequested() && top != null && !top.isNoDisplay();
+            orientation = top == null ? 0 : hostOrientation(top.getRequestedOrientation());
             focused = task.isFocused();
             this.hostFocused = hostFocused;
             this.keepScreenOn = keepScreenOn;
@@ -97,7 +98,7 @@ final class DroidloomTaskBackend {
         }
         long[] publish(boolean activate) {
             return DroidloomTaskNative.registerTask(id, incarnation, user, display, owner, activate,
-                    keepScreenOn, parent);
+                    keepScreenOn, parent, orientation);
         }
         boolean sameInput(Snapshot other) {
             return other != null && incarnation == other.incarnation && display == other.display
@@ -106,6 +107,37 @@ final class DroidloomTaskBackend {
         boolean publishInput() {
             return inputToken != null && DroidloomInputNative.publish(
                     id, incarnation, display, bounds, inputToken);
+        }
+    }
+
+    /**
+     * The host's orientation for an activity's requested one, as Android
+     * turns a phone's display for its front activity: 0 follows the host's
+     * rotation lock or sensor, 1 portrait, 2 landscape on a fixed side,
+     * 3 landscape on the sensor's side, 4 the sensor despite the lock,
+     * 5 keeps the current one (denial_orientation_manager_v1).
+     */
+    static int hostOrientation(int requested) {
+        switch (requested) {
+            case ActivityInfo.SCREEN_ORIENTATION_PORTRAIT:
+            case ActivityInfo.SCREEN_ORIENTATION_REVERSE_PORTRAIT:
+            case ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT:
+            case ActivityInfo.SCREEN_ORIENTATION_USER_PORTRAIT:
+            case ActivityInfo.SCREEN_ORIENTATION_NOSENSOR:
+                return 1;
+            case ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE:
+                return 2;
+            case ActivityInfo.SCREEN_ORIENTATION_REVERSE_LANDSCAPE:
+            case ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE:
+            case ActivityInfo.SCREEN_ORIENTATION_USER_LANDSCAPE:
+                return 3;
+            case ActivityInfo.SCREEN_ORIENTATION_SENSOR:
+            case ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR:
+                return 4;
+            case ActivityInfo.SCREEN_ORIENTATION_LOCKED:
+                return 5;
+            default:
+                return 0;
         }
     }
 
