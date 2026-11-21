@@ -13,10 +13,15 @@ import android.content.Intent;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.drawable.Drawable;
+import android.media.MediaMetadata;
+import android.media.session.MediaController;
+import android.media.session.MediaSession;
+import android.media.session.PlaybackState;
 import com.android.droidloom.runtime.HostChannel;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.ServiceManager;
+import android.os.SystemClock;
 import android.os.UserHandle;
 import android.provider.Settings;
 import android.service.notification.NotificationListenerService;
@@ -24,10 +29,12 @@ import android.service.notification.StatusBarNotification;
 import android.util.Log;
 import android.util.LruCache;
 import java.io.DataInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.DataOutputStream;
 import java.io.PrintWriter;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.UUID;
@@ -49,6 +56,8 @@ public final class NotificationBridge extends NotificationListenerService implem
     private final LruCache<String, String> icons = new LruCache<>(32);
     private final LruCache<String, String> components = new LruCache<>(32);
     private final String session = UUID.randomUUID().toString();
+    /** The media session behind each media notification, as SystemUI's MediaDataManager follows it. */
+    private final HashMap<String, Media> media = new HashMap<>();
     private long generation;
     private boolean dirty;
     private volatile boolean stopped, connected, listening;
@@ -63,18 +72,56 @@ public final class NotificationBridge extends NotificationListenerService implem
             this.sbn = sbn; this.version = version; this.importance = importance; this.channel = channel;
         }
     }
+    /**
+     * A media notification's session: every playback or metadata change reposts the
+     * notification, so the host's player follows it.
+     */
+    private final class Media extends MediaController.Callback {
+        final String key;
+        final MediaController controller;
+        /** The last artwork sent and its JPEG as hex, so an unchanged picture is not encoded again. */
+        Bitmap art; String artHex="";
+        Media(String key, MediaSession.Token token) {
+            this.key=key; controller=new MediaController(context,token);
+            controller.registerCallback(this,main);
+        }
+        @Override public void onPlaybackStateChanged(PlaybackState state) { touch(key); }
+        @Override public void onMetadataChanged(MediaMetadata metadata) { touch(key); }
+        @Override public void onSessionDestroyed() { touch(key); }
+        void close() { try { controller.unregisterCallback(this); } catch(Exception ignored) { } }
+    }
+    /** A new version of [key] with the same notification (its session changed). */
+    private void touch(String key) {
+        synchronized(lock) {
+            Entry entry=active.get(key); if(entry==null) return;
+            active.put(key,new Entry(entry.sbn,session+"-"+(++generation),entry.importance,entry.channel));
+            dirty=true; lock.notifyAll();
+        }
+    }
+    private void forget(String key) { Media old=media.remove(key); if(old!=null) old.close(); }
+    private void forgetAll() { for(Media m:media.values()) m.close(); media.clear(); }
+    /** Follows the session a media notification names (MediaDataManager.onNotificationAdded). */
+    private void follow(StatusBarNotification sbn) {
+        MediaSession.Token token=sbn.getNotification().extras.getParcelable(Notification.EXTRA_MEDIA_SESSION,MediaSession.Token.class);
+        Media current=media.get(sbn.getKey());
+        if(token==null) { forget(sbn.getKey()); return; }
+        if(current!=null && current.controller.getSessionToken().equals(token)) return;
+        forget(sbn.getKey());
+        try { media.put(sbn.getKey(),new Media(sbn.getKey(),token)); }
+        catch(Exception e) { Log.w(TAG,"Media session unavailable: "+e.getClass().getSimpleName()); }
+    }
     public NotificationBridge(Context context) { this.context=context; main=new Handler(context.getMainLooper()); }
     public void start() {
         try {
             registerAsSystemService(context, new ComponentName(context, NotificationBridge.class), UserHandle.USER_SYSTEM);
-            Log.i(TAG, "DROIDLOOM_NOTIFICATIONS_ABI=3;");
+            Log.i(TAG, "DROIDLOOM_NOTIFICATIONS_ABI=4;");
             Thread worker = new Thread(this::connect, "droidloom-notifications");
             worker.setDaemon(true); worker.start();
         } catch (Exception e) { Log.e(TAG, "Notification listener registration failed: " + e.getClass().getSimpleName()); }
     }
     @Override public void onListenerConnected() {
         synchronized (lock) {
-            active.clear(); alerting.clear(); listening=true;
+            active.clear(); alerting.clear(); forgetAll(); listening=true;
             StatusBarNotification[] all=getActiveNotifications();
             if (all!=null) for (StatusBarNotification sbn:all) put(sbn, getCurrentRanking(), false);
             dirty=true; lock.notifyAll();
@@ -117,18 +164,19 @@ public final class NotificationBridge extends NotificationListenerService implem
         }
     }
     @Override public void onNotificationRemoved(StatusBarNotification sbn) {
-        synchronized(lock) { active.remove(sbn.getKey()); alerting.remove(sbn.getKey()); dirty=true; lock.notifyAll(); }
+        synchronized(lock) { active.remove(sbn.getKey()); alerting.remove(sbn.getKey()); forget(sbn.getKey()); dirty=true; lock.notifyAll(); }
     }
     private void put(StatusBarNotification sbn, RankingMap map, boolean live) {
         Ranking rank = new Ranking();
         boolean ranked = map!=null && map.getRanking(sbn.getKey(),rank);
         int importance=ranked?rank.getImportance():NotificationManager.IMPORTANCE_DEFAULT;
         if (ranked && (rank.isSuspended() || importance==NotificationManager.IMPORTANCE_NONE)) {
-            active.remove(sbn.getKey()); alerting.remove(sbn.getKey()); return;
+            active.remove(sbn.getKey()); alerting.remove(sbn.getKey()); forget(sbn.getKey()); return;
         }
         boolean update=active.containsKey(sbn.getKey());
-        if (!update && active.size()>=MAX_ACTIVE) { String oldest=active.keySet().iterator().next(); active.remove(oldest); alerting.remove(oldest); }
+        if (!update && active.size()>=MAX_ACTIVE) { String oldest=active.keySet().iterator().next(); active.remove(oldest); alerting.remove(oldest); forget(oldest); }
         active.put(sbn.getKey(),new Entry(sbn,session+"-"+(++generation),importance,ranked?rank.getChannel():null));
+        follow(sbn);
         if (live && alerts(sbn,rank,ranked,importance,update)) alerting.add(sbn.getKey());
     }
     /** SystemUI's heads-up decision: HIGH importance, and the post says something new. */
@@ -144,14 +192,14 @@ public final class NotificationBridge extends NotificationListenerService implem
             try (HostChannel current = HostChannel.open(HostChannel.NOTIFICATIONS)) {
                 socket=current;
                 DataOutputStream out=new DataOutputStream(current.getOutputStream());
-                send(out,new JSONObject().put("type","hello").put("abi",3));
+                send(out,new JSONObject().put("type","hello").put("abi",4));
                 current.setSoTimeout(5000);
                 DataInputStream input=new DataInputStream(current.getInputStream());
                 int helloLength=input.readInt();
                 if(helloLength<=0 || helloLength>4096) throw new IllegalArgumentException();
                 byte[] helloBytes=new byte[helloLength]; input.readFully(helloBytes);
                 JSONObject hello=new JSONObject(new String(helloBytes,StandardCharsets.UTF_8));
-                if(!"hello".equals(hello.optString("type")) || hello.optInt("abi")!=3) throw new IllegalArgumentException();
+                if(!"hello".equals(hello.optString("type")) || hello.optInt("abi")!=4) throw new IllegalArgumentException();
                 current.setSoTimeout(0);
                 connected=true;
                 Thread writer=new Thread(() -> writeSnapshots(current,out),"droidloom-notifications-out");
@@ -244,6 +292,8 @@ public final class NotificationBridge extends NotificationListenerService implem
         android.content.pm.ApplicationInfo info=context.getPackageManager().getApplicationInfo(sbn.getPackageName(),0);
         String label=context.getPackageManager().getApplicationLabel(info).toString();
         NotificationChannel channel=entry.channel;
+        Media session; synchronized(lock) { session=media.get(sbn.getKey()); }
+        JSONObject player=session==null?null:player(session,n,extras);
         return new JSONObject().put("key",sbn.getKey()).put("version",entry.version).put("package",sbn.getPackageName())
                 .put("app",text(label,256)).put("title",title).put("body",body).put("actions",actions)
                 // Android HIGH requests a heads-up alert; it does not mean a critical
@@ -261,14 +311,120 @@ public final class NotificationBridge extends NotificationListenerService implem
                 .put("user",sbn.getNormalizedUserId()).put("component",component)
                 // The host names the app icon through its desktop entry when it has one.
                 .put("icon",component.isEmpty()?icon(sbn.getPackageName()):"")
-                .put("large_icon",largeIcon(n))
+                // A player's artwork travels with the player.
+                .put("large_icon",player!=null?"":largeIcon(n))
                 // The status bar icon, white on clear; the host tints it.
                 .put("small_icon",smallIcon(n))
                 // The notification settings: the channel's name, and whether the user may
                 // change its importance (SystemUI's NotificationInfo rules).
                 .put("channel",channel==null?"":text(channel.getName(),256))
                 .put("configurable",configurable(channel,info))
-                .put("messages",messages(extras));
+                .put("messages",messages(extras))
+                .put("media",player==null?JSONObject.NULL:player);
+    }
+    /**
+     * The player SystemUI's media controls show for a session (MediaDataManager,
+     * MediaActions): what plays, where it is, and the buttons the app offers.
+     */
+    private JSONObject player(Media media, Notification n, Bundle extras) throws Exception {
+        MediaController controller=media.controller;
+        PlaybackState state=controller.getPlaybackState();
+        MediaMetadata meta=controller.getMetadata();
+        int playback=state==null?PlaybackState.STATE_NONE:state.getState();
+        boolean playing=playback==PlaybackState.STATE_PLAYING || playback==PlaybackState.STATE_FAST_FORWARDING
+                || playback==PlaybackState.STATE_REWINDING;
+        boolean buffering=playback==PlaybackState.STATE_BUFFERING || playback==PlaybackState.STATE_CONNECTING;
+        long duration=meta==null?0:Math.max(0,meta.getLong(MediaMetadata.METADATA_KEY_DURATION));
+        long position=state==null?0:Math.max(0,state.getPosition());
+        float speed=state==null?0:state.getPlaybackSpeed();
+        if(playing && state.getLastPositionUpdateTime()>0)
+            position+=(long)((SystemClock.elapsedRealtime()-state.getLastPositionUpdateTime())*speed);
+        if(duration>0) position=Math.min(position,duration);
+        long actions=state==null?0:state.getActions();
+        // As MediaDataManager: the session's metadata, else the notification's text.
+        String title=first(meta,MediaMetadata.METADATA_KEY_DISPLAY_TITLE,MediaMetadata.METADATA_KEY_TITLE);
+        if(title.isEmpty()) title=text(extras.getCharSequence(Notification.EXTRA_TITLE),1024);
+        String artist=first(meta,MediaMetadata.METADATA_KEY_DISPLAY_SUBTITLE,MediaMetadata.METADATA_KEY_ARTIST,MediaMetadata.METADATA_KEY_ALBUM_ARTIST);
+        if(artist.isEmpty()) artist=text(extras.getCharSequence(Notification.EXTRA_TEXT),1024);
+        JSONArray custom=new JSONArray();
+        if(state!=null) for(PlaybackState.CustomAction action:state.getCustomActions()) {
+            if(custom.length()>=4) break;
+            custom.put(new JSONObject().put("id",text(action.getAction(),256)).put("label",text(action.getName(),256))
+                    .put("icon",actionIcon(controller.getPackageName(),action.getIcon())));
+        }
+        return new JSONObject().put("playing",playing).put("buffering",buffering)
+                .put("position",position).put("rate",Math.round((playing?speed:0)*1000)).put("duration",duration)
+                .put("title",title).put("artist",artist).put("album",first(meta,MediaMetadata.METADATA_KEY_ALBUM))
+                .put("art",art(media,meta,n))
+                .put("play",(actions&(PlaybackState.ACTION_PLAY|PlaybackState.ACTION_PLAY_PAUSE))!=0)
+                .put("pause",(actions&(PlaybackState.ACTION_PAUSE|PlaybackState.ACTION_PLAY_PAUSE))!=0)
+                .put("next",(actions&PlaybackState.ACTION_SKIP_TO_NEXT)!=0)
+                .put("previous",(actions&PlaybackState.ACTION_SKIP_TO_PREVIOUS)!=0)
+                .put("seek",duration>0 && (actions&PlaybackState.ACTION_SEEK_TO)!=0)
+                .put("custom",custom);
+    }
+    private static String first(MediaMetadata meta,String... keys) {
+        if(meta==null) return "";
+        for(String key:keys) { String value=text(meta.getText(key),1024); if(!value.isEmpty()) return value; }
+        return "";
+    }
+    /** The album art as a JPEG of at most 384 px, as hex; the session's, else the notification's large icon. */
+    private String art(Media media, MediaMetadata meta, Notification n) {
+        Bitmap bitmap=null;
+        if(meta!=null) bitmap=meta.getBitmap(MediaMetadata.METADATA_KEY_ART);
+        if(bitmap==null && meta!=null) bitmap=meta.getBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART);
+        if(bitmap==null && meta!=null) bitmap=meta.getBitmap(MediaMetadata.METADATA_KEY_DISPLAY_ICON);
+        try {
+            if(bitmap==null && n.getLargeIcon()!=null) {
+                Drawable drawable=n.getLargeIcon().loadDrawable(context);
+                if(drawable instanceof android.graphics.drawable.BitmapDrawable b) bitmap=b.getBitmap();
+            }
+            if(bitmap==null) { media.art=null; media.artHex=""; return ""; }
+            if(media.art!=null && (media.art==bitmap || media.art.sameAs(bitmap))) return media.artHex;
+            float scale=Math.min(1f,384f/Math.max(bitmap.getWidth(),bitmap.getHeight()));
+            Bitmap small=Bitmap.createScaledBitmap(bitmap,Math.max(1,Math.round(bitmap.getWidth()*scale)),
+                    Math.max(1,Math.round(bitmap.getHeight()*scale)),true);
+            String hex="";
+            for(int quality:new int[]{85,60,40}) {
+                ByteArrayOutputStream out=new ByteArrayOutputStream();
+                small.compress(Bitmap.CompressFormat.JPEG,quality,out);
+                if(out.size()<=48000) { hex=hexBytes(out.toByteArray()); break; }
+            }
+            if(small!=bitmap) small.recycle();
+            media.art=bitmap; media.artHex=hex; return hex;
+        } catch(Exception e) { return ""; }
+    }
+    /** A custom action's icon, from the app's resources, 48 px RGBA as hex. */
+    private String actionIcon(String pkg,int id) {
+        try {
+            Drawable drawable=context.getPackageManager().getResourcesForApplication(pkg).getDrawable(id,null);
+            return drawable==null?"":pixels(drawable,48);
+        } catch(Exception e) { return ""; }
+    }
+    private static String hexBytes(byte[] bytes) {
+        StringBuilder out=new StringBuilder(bytes.length*2);
+        for(byte b:bytes) hex(out,b&255);
+        return out.toString();
+    }
+    /** A media button pressed on the host's player (MediaControlPanel's actions). */
+    private void mediaCommand(JSONObject message) throws Exception {
+        Media m; synchronized(lock) { m=media.get(message.getString("key")); }
+        if(m==null) return;
+        MediaController.TransportControls controls=m.controller.getTransportControls();
+        switch(message.getString("command")) {
+            case "play" -> controls.play();
+            case "pause" -> controls.pause();
+            case "next" -> controls.skipToNext();
+            case "previous" -> controls.skipToPrevious();
+            case "seek" -> controls.seekTo(Math.max(0,message.getLong("position")));
+            case "custom" -> {
+                PlaybackState state=m.controller.getPlaybackState();
+                String id=message.getString("action");
+                if(state!=null) for(PlaybackState.CustomAction action:state.getCustomActions())
+                    if(action.getAction().equals(id)) { controls.sendCustomAction(action,action.getExtras()); break; }
+            }
+            default -> { }
+        }
     }
     /** The launcher activity Droidloom's desktop entry for this package names, or "". */
     private String component(StatusBarNotification sbn) {
@@ -349,6 +505,7 @@ public final class NotificationBridge extends NotificationListenerService implem
     }
     private void command(JSONObject message) {
         try {
+            if("media".equals(message.optString("type"))) { mediaCommand(message); return; }
             Entry entry;
             synchronized(lock) { entry=active.get(message.getString("key")); }
             if(entry==null || !entry.version.equals(message.getString("version"))) return;
@@ -389,6 +546,6 @@ public final class NotificationBridge extends NotificationListenerService implem
         try { socket.close(); } catch(Exception ignored) { }
     }
     private void disconnect() { connected=false; HostChannel current=socket; if(current!=null) closeSocket(current); synchronized(lock) { lock.notifyAll(); } }
-    @Override public void close() { stopped=true; disconnect(); try { unregisterAsSystemService(); } catch(Exception ignored) { } }
-    public void dump(PrintWriter out) { synchronized(lock) { out.println("DROIDLOOM_NOTIFICATIONS_ABI=3; notificationsListening="+listening+" notificationsConnected="+connected+" activeNotifications="+active.size()); } }
+    @Override public void close() { stopped=true; disconnect(); synchronized(lock) { forgetAll(); } try { unregisterAsSystemService(); } catch(Exception ignored) { } }
+    public void dump(PrintWriter out) { synchronized(lock) { out.println("DROIDLOOM_NOTIFICATIONS_ABI=4; notificationsListening="+listening+" notificationsConnected="+connected+" activeNotifications="+active.size()); } }
 }

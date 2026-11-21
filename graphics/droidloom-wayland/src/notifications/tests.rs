@@ -104,6 +104,7 @@ fn note(version: &str) -> Note {
         channel: String::new(),
         configurable: false,
         messages: vec![],
+        media: None,
     }
 }
 async fn frame(socket: &Async<UnixStream>, value: serde_json::Value) {
@@ -189,10 +190,10 @@ fn dbus_and_android_socket_lifecycle() {
         let bridge = serve(&listener, &state, conn, unsafe { libc::getuid() }, &grants);
         let checks = async {
             let socket = Async::<UnixStream>::connect(&path).await.unwrap();
-            frame(&socket, serde_json::json!({"type":"hello","abi":3})).await;
+            frame(&socket, serde_json::json!({"type":"hello","abi":4})).await;
             assert_eq!(
                 reply(&socket).await,
-                serde_json::json!({"type":"hello","abi":3})
+                serde_json::json!({"type":"hello","abi":4})
             );
             snapshot(&socket, &[note("v1")]).await;
             match timeout(rx.recv()).await.unwrap() {
@@ -302,10 +303,10 @@ fn dbus_and_android_socket_lifecycle() {
             // Reconnecting Android sends a snapshot without duplicating an unchanged item.
             drop(socket);
             let socket = Async::<UnixStream>::connect(&path).await.unwrap();
-            frame(&socket, serde_json::json!({"type":"hello","abi":3})).await;
+            frame(&socket, serde_json::json!({"type":"hello","abi":4})).await;
             assert_eq!(
                 reply(&socket).await,
-                serde_json::json!({"type":"hello","abi":3})
+                serde_json::json!({"type":"hello","abi":4})
             );
             snapshot(&socket, &[note("v4")]).await;
             quiet(&rx).await;
@@ -451,7 +452,7 @@ fn deltas_require_sync_and_stale_removal_cannot_delete_newer_versions() {
         known: BTreeMap::new(),
         synced: false,
     };
-    peer.ingest(&encoded(serde_json::json!({"type":"hello","abi":3})))
+    peer.ingest(&encoded(serde_json::json!({"type":"hello","abi":4})))
         .unwrap();
     assert!(
         peer.ingest(&encoded(
@@ -560,4 +561,36 @@ fn launcher_activity_names_the_droidloom_desktop_entry_and_groups_cross() {
     assert!(hints.contains_key("image-data"));
     assert!(hints.contains_key("x-denial-messages"));
     assert!(!bool::try_from(hints.get("x-denial-clearable").unwrap()).unwrap());
+}
+
+#[test]
+fn media_players_are_validated() {
+    let mut n = note("v1");
+    n.media = Some(Media {
+        playing: true,
+        buffering: false,
+        position: 1_000,
+        rate: 1000,
+        duration: 200_000,
+        title: "Song".into(),
+        artist: "Artist".into(),
+        album: String::new(),
+        art: "ffd8ffd9".into(),
+        play: true,
+        pause: true,
+        next: true,
+        previous: true,
+        seek: true,
+        custom: vec![CustomAction {
+            id: "like".into(),
+            label: "Like".into(),
+            icon: String::new(),
+        }],
+    });
+    assert!(n.valid());
+    n.media.as_mut().unwrap().art = "abc".into();
+    assert!(!n.valid());
+    n.media.as_mut().unwrap().art = String::new();
+    n.media.as_mut().unwrap().custom[0].icon = "00".into();
+    assert!(!n.valid());
 }

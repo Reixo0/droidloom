@@ -81,7 +81,7 @@ impl Bridge {
                     }
                 });
             })?;
-        eprintln!("DROIDLOOM_NOTIFICATIONS_ABI=3;");
+        eprintln!("DROIDLOOM_NOTIFICATIONS_ABI=4;");
         Ok(Self { stop, path })
     }
 }
@@ -140,6 +140,60 @@ struct Note {
     configurable: bool,
     /// The last MessagingStyle messages, oldest first.
     messages: Vec<ChatMessage>,
+    /// A media notification's session: the host shows a player instead.
+    #[serde(default)]
+    media: Option<Media>,
+}
+/// What a media session plays and the buttons it offers (SystemUI's
+/// MediaData).
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct Media {
+    playing: bool,
+    buffering: bool,
+    /// Milliseconds, when this was sent.
+    position: i64,
+    /// Playback speed in thousandths; 0 while not playing.
+    rate: i32,
+    /// Milliseconds, or 0 when unknown.
+    duration: i64,
+    title: String,
+    artist: String,
+    album: String,
+    /// The artwork as a JPEG in hex, or empty.
+    art: String,
+    play: bool,
+    pause: bool,
+    next: bool,
+    previous: bool,
+    seek: bool,
+    /// The app's own buttons (`PlaybackState.CustomAction`).
+    custom: Vec<CustomAction>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct CustomAction {
+    id: String,
+    label: String,
+    /// 48 px RGBA as hex, or empty.
+    icon: String,
+}
+impl Media {
+    fn valid(&self) -> bool {
+        let text = |s: &String| s.len() <= 4096 && !s.contains('\0');
+        self.position >= 0
+            && self.duration >= 0
+            && self.duration <= 7 * 24 * 3_600_000
+            && (-100_000..=100_000).contains(&self.rate)
+            && [&self.title, &self.artist, &self.album].into_iter().all(text)
+            && self.art.len() <= 96_000
+            && self.art.len().is_multiple_of(2)
+            && self.art.bytes().all(|b| b.is_ascii_hexdigit())
+            && self.custom.len() <= 4
+            && self.custom.iter().all(|a| {
+                !a.id.is_empty() && a.id.len() <= 1024 && text(&a.id) && text(&a.label) && rgba_hex(&a.icon, 48)
+            })
+    }
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -203,6 +257,7 @@ impl Note {
                     && !m.sender.contains('\0')
                     && !m.text.contains('\0')
             })
+            && self.media.as_ref().is_none_or(Media::valid)
             && self.actions.len() <= 17
             && self.actions.iter().all(|a| {
                 (a.key == "default"
@@ -254,7 +309,7 @@ impl Peer {
             let frame: Frame = serde_json::from_slice(&self.buffer[4..length + 4])?;
             self.buffer.drain(..length + 4);
             match frame {
-                Frame::Hello { abi: 3 } if !self.hello => self.hello = true,
+                Frame::Hello { abi: 4 } if !self.hello => self.hello = true,
                 Frame::Begin if self.hello && self.snapshot.is_none() => {
                     self.snapshot = Some(BTreeMap::new())
                 }
@@ -420,12 +475,7 @@ fn notify_hints(n: &Note, quiet: bool) -> (&'static str, HashMap<&'static str, V
     // Android retains sound policy, including channel preferences and DND.
     hints.insert("suppress-sound", Value::from(true));
     hints.insert("x-denial-alert", Value::from(n.alert && !quiet));
-    let desktop_entry = (!n.component.is_empty()).then(|| {
-        format!(
-            "droidloom-{}",
-            droidloom_contracts::applications::application_id(n.user, &n.component)
-        )
-    });
+    let desktop_entry = desktop_entry(n);
     if let Some(entry) = &desktop_entry {
         hints.insert("desktop-entry", Value::from(entry.clone()));
     }
@@ -483,6 +533,16 @@ fn notify_hints(n: &Note, quiet: bool) -> (&'static str, HashMap<&'static str, V
     };
     (icon, hints)
 }
+/// The desktop entry Droidloom installed for the app, when Android named its
+/// launcher activity.
+fn desktop_entry(n: &Note) -> Option<String> {
+    (!n.component.is_empty()).then(|| {
+        format!(
+            "droidloom-{}",
+            droidloom_contracts::applications::application_id(n.user, &n.component)
+        )
+    })
+}
 fn escape_markup(text: &str) -> String {
     text.replace('&', "&amp;")
         .replace('<', "&lt;")
@@ -492,6 +552,7 @@ async fn reconcile(
     state: &mut State,
     snapshot: BTreeMap<String, Note>,
     desktop: &Desktop<'_>,
+    players: &mut media::Players,
 ) -> Result<()> {
     let removed: Vec<_> = state
         .records
@@ -500,6 +561,7 @@ async fn reconcile(
         .cloned()
         .collect();
     for key in removed {
+        players.remove(&key).await;
         if let Some(record) = state.records.remove(&key) {
             if let Some(id) = record.id {
                 desktop.close(id).await;
@@ -507,7 +569,7 @@ async fn reconcile(
         }
     }
     for (key, note) in snapshot {
-        upsert(state, key, note, desktop, true).await?;
+        upsert(state, key, note, desktop, players, true).await?;
     }
     Ok(())
 }
@@ -516,8 +578,15 @@ async fn upsert(
     key: String,
     note: Note,
     desktop: &Desktop<'_>,
+    players: &mut media::Players,
     quiet: bool,
 ) -> Result<()> {
+    // SystemUI shows a media notification as its player only.
+    if note.media.is_some() {
+        players.update(&note, desktop_entry(&note)).await;
+    } else if players.contains(&key) {
+        players.remove(&key).await;
+    }
     let record = state.records.entry(key).or_default();
     if record.version != note.version {
         record.hidden = false;
@@ -525,6 +594,12 @@ async fn upsert(
     let changed = record.version != note.version;
     record.version = note.version.clone();
     record.note = Some(note.clone());
+    if note.media.is_some() {
+        if let Some(id) = record.id.take() {
+            desktop.close(id).await;
+        }
+        return Ok(());
+    }
     if !state.owner.is_empty() && !record.hidden && (changed || record.id.is_none()) {
         record.id = Some(desktop.notify(&note, record.id.unwrap_or(0), quiet).await?);
     }
@@ -535,6 +610,8 @@ enum Event {
     Data(io::Result<Vec<u8>>),
     Signal(Option<zbus::Result<Message>>),
     Owner(Option<zbus::Result<Message>>),
+    /// A button pressed on one of the media players.
+    Media(std::result::Result<serde_json::Value, async_channel::RecvError>),
 }
 async fn read_peer(peer: Option<&Peer>) -> Event {
     let Some(peer) = peer else {
@@ -608,6 +685,8 @@ async fn serve(
     }
     state.owner(owner);
     let mut peer: Option<Peer> = None;
+    let (commands, requests) = async_channel::bounded(32);
+    let mut players = media::Players::new(commands);
     // Denial emits ActivationToken right before ActionInvoked for one tap.
     let mut activation: Option<(u32, String)> = None;
     loop {
@@ -616,9 +695,12 @@ async fn serve(
                 async { Event::Accept(listener.accept().await) },
                 read_peer(peer.as_ref()),
             ),
-            future::race(async { Event::Signal(signals.next().await) }, async {
-                Event::Owner(owners.next().await)
-            }),
+            future::race(
+                future::race(async { Event::Signal(signals.next().await) }, async {
+                    Event::Owner(owners.next().await)
+                }),
+                async { Event::Media(requests.recv().await) },
+            ),
         )
         .await;
         match event {
@@ -645,7 +727,7 @@ async fn serve(
                             if peer
                                 .as_ref()
                                 .unwrap()
-                                .send(serde_json::json!({"type":"hello","abi":3}))
+                                .send(serde_json::json!({"type":"hello","abi":4}))
                                 .await
                                 .is_err()
                             {
@@ -657,11 +739,19 @@ async fn serve(
                         for update in snapshots {
                             match update {
                                 Update::Snapshot(snapshot) => {
-                                    reconcile(&mut state, snapshot, &desktop).await?
+                                    reconcile(&mut state, snapshot, &desktop, &mut players)
+                                        .await?
                                 }
                                 Update::Post(note) => {
-                                    upsert(&mut state, note.key.clone(), note, &desktop, false)
-                                        .await?
+                                    upsert(
+                                        &mut state,
+                                        note.key.clone(),
+                                        note,
+                                        &desktop,
+                                        &mut players,
+                                        false,
+                                    )
+                                    .await?
                                 }
                                 Update::Remove { key, version } => {
                                     if state
@@ -669,6 +759,7 @@ async fn serve(
                                         .get(&key)
                                         .is_some_and(|record| record.version == version)
                                     {
+                                        players.remove(&key).await;
                                         if let Some(record) = state.records.remove(&key) {
                                             if let Some(id) = record.id {
                                                 desktop.close(id).await;
@@ -691,6 +782,14 @@ async fn serve(
                 }
             }
             Event::Data(_) => peer = None,
+            Event::Media(Ok(command)) => {
+                if let Some(p) = peer.as_ref() {
+                    if p.send(command).await.is_err() {
+                        peer = None;
+                    }
+                }
+            }
+            Event::Media(Err(_)) => (),
             Event::Owner(Some(Ok(message))) => {
                 let (_, _, owner): (String, String, String) = message.body().deserialize()?;
                 if owner == state.owner {
@@ -711,7 +810,7 @@ async fn serve(
                     .iter()
                     .filter_map(|(k, r)| r.note.clone().map(|n| (k.clone(), n)))
                     .collect();
-                reconcile(&mut state, snapshot, &desktop).await?;
+                reconcile(&mut state, snapshot, &desktop, &mut players).await?;
                 state.save(state_path)?;
             }
             Event::Signal(Some(Ok(message))) => {
@@ -802,5 +901,6 @@ fn authenticated_peer(s: &UnixStream, expected_uid: u32) -> io::Result<bool> {
     Ok(cred.uid == expected_uid)
 }
 
+mod media;
 #[cfg(test)]
 mod tests;
