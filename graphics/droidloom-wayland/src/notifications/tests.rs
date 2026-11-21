@@ -100,6 +100,9 @@ fn note(version: &str) -> Note {
         user: 0,
         component: String::new(),
         large_icon: String::new(),
+        small_icon: String::new(),
+        channel: String::new(),
+        configurable: false,
         messages: vec![],
     }
 }

@@ -2,7 +2,9 @@
 package com.android.systemui.notifications;
 
 import android.app.ActivityOptions;
+import android.app.INotificationManager;
 import android.app.Notification;
+import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.content.ComponentName;
@@ -14,7 +16,9 @@ import android.graphics.drawable.Drawable;
 import com.android.droidloom.runtime.HostChannel;
 import android.os.Bundle;
 import android.os.Handler;
+import android.os.ServiceManager;
 import android.os.UserHandle;
+import android.provider.Settings;
 import android.service.notification.NotificationListenerService;
 import android.service.notification.StatusBarNotification;
 import android.util.Log;
@@ -53,8 +57,10 @@ public final class NotificationBridge extends NotificationListenerService implem
         final StatusBarNotification sbn;
         final String version;
         final int importance;
-        Entry(StatusBarNotification sbn, String version, int importance) {
-            this.sbn = sbn; this.version = version; this.importance = importance;
+        /** The notification's channel as ranked, or null. */
+        final NotificationChannel channel;
+        Entry(StatusBarNotification sbn, String version, int importance, NotificationChannel channel) {
+            this.sbn = sbn; this.version = version; this.importance = importance; this.channel = channel;
         }
     }
     public NotificationBridge(Context context) { this.context=context; main=new Handler(context.getMainLooper()); }
@@ -98,6 +104,18 @@ public final class NotificationBridge extends NotificationListenerService implem
             n.fullScreenIntent.send(context,0,null,null,null,null,options.toBundle());
         } catch(Exception e) { Log.w(TAG,"Full-screen intent unavailable: "+e.getClass().getSimpleName()); }
     }
+    /** A channel's importance changed (from the notification settings, say): repost quietly. */
+    @Override public void onNotificationRankingUpdate(RankingMap map) {
+        synchronized(lock) {
+            for(Entry entry:new ArrayList<>(active.values())) {
+                Ranking rank=new Ranking();
+                if(map!=null && map.getRanking(entry.sbn.getKey(),rank) && rank.getImportance()!=entry.importance) {
+                    put(entry.sbn,map,false); dirty=true;
+                }
+            }
+            lock.notifyAll();
+        }
+    }
     @Override public void onNotificationRemoved(StatusBarNotification sbn) {
         synchronized(lock) { active.remove(sbn.getKey()); alerting.remove(sbn.getKey()); dirty=true; lock.notifyAll(); }
     }
@@ -110,7 +128,7 @@ public final class NotificationBridge extends NotificationListenerService implem
         }
         boolean update=active.containsKey(sbn.getKey());
         if (!update && active.size()>=MAX_ACTIVE) { String oldest=active.keySet().iterator().next(); active.remove(oldest); alerting.remove(oldest); }
-        active.put(sbn.getKey(),new Entry(sbn,session+"-"+(++generation),importance));
+        active.put(sbn.getKey(),new Entry(sbn,session+"-"+(++generation),importance,ranked?rank.getChannel():null));
         if (live && alerts(sbn,rank,ranked,importance,update)) alerting.add(sbn.getKey());
     }
     /** SystemUI's heads-up decision: HIGH importance, and the post says something new. */
@@ -223,7 +241,9 @@ public final class NotificationBridge extends NotificationListenerService implem
         int max=extras.getInt(Notification.EXTRA_PROGRESS_MAX,0), value=extras.getInt(Notification.EXTRA_PROGRESS,0);
         int progress=max>0 && !extras.getBoolean(Notification.EXTRA_PROGRESS_INDETERMINATE)
                 ? (int)Math.max(0,Math.min(100,(long)value*100/max)) : -1;
-        String label=context.getPackageManager().getApplicationLabel(context.getPackageManager().getApplicationInfo(sbn.getPackageName(),0)).toString();
+        android.content.pm.ApplicationInfo info=context.getPackageManager().getApplicationInfo(sbn.getPackageName(),0);
+        String label=context.getPackageManager().getApplicationLabel(info).toString();
+        NotificationChannel channel=entry.channel;
         return new JSONObject().put("key",sbn.getKey()).put("version",entry.version).put("package",sbn.getPackageName())
                 .put("app",text(label,256)).put("title",title).put("body",body).put("actions",actions)
                 // Android HIGH requests a heads-up alert; it does not mean a critical
@@ -242,6 +262,12 @@ public final class NotificationBridge extends NotificationListenerService implem
                 // The host names the app icon through its desktop entry when it has one.
                 .put("icon",component.isEmpty()?icon(sbn.getPackageName()):"")
                 .put("large_icon",largeIcon(n))
+                // The status bar icon, white on clear; the host tints it.
+                .put("small_icon",smallIcon(n))
+                // The notification settings: the channel's name, and whether the user may
+                // change its importance (SystemUI's NotificationInfo rules).
+                .put("channel",channel==null?"":text(channel.getName(),256))
+                .put("configurable",configurable(channel,info))
                 .put("messages",messages(extras));
     }
     /** The launcher activity Droidloom's desktop entry for this package names, or "". */
@@ -260,6 +286,37 @@ public final class NotificationBridge extends NotificationListenerService implem
     private String largeIcon(Notification n) {
         if(n.getLargeIcon()==null) return "";
         try { return pixels(n.getLargeIcon().loadDrawable(context),96); } catch(Exception e) { return ""; }
+    }
+    private static boolean configurable(NotificationChannel channel, android.content.pm.ApplicationInfo info) {
+        return channel!=null && !channel.isImportanceLockedByCriticalDeviceFunction()
+                && (channel.isBlockable() || !info.isSystemApp());
+    }
+    /** The notification settings Denial shows on a long press. */
+    private void control(Entry entry, String action) throws Exception {
+        StatusBarNotification sbn=entry.sbn; NotificationChannel channel=entry.channel;
+        if(action.equals("x-denial-settings")) {
+            Intent intent=channel!=null
+                    ? new Intent(Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS).putExtra(Settings.EXTRA_CHANNEL_ID,channel.getId())
+                    : new Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS);
+            intent.putExtra(Settings.EXTRA_APP_PACKAGE,sbn.getPackageName()).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            context.startActivityAsUser(intent,sbn.getUser());
+            return;
+        }
+        int importance=action.equals("x-denial-alerting")?NotificationManager.IMPORTANCE_DEFAULT
+                : action.equals("x-denial-silent")?NotificationManager.IMPORTANCE_LOW
+                : action.equals("x-denial-turn-off")?NotificationManager.IMPORTANCE_NONE : -1;
+        android.content.pm.ApplicationInfo info=context.getPackageManager().getApplicationInfo(sbn.getPackageName(),0);
+        if(importance<0 || !configurable(channel,info)) return;
+        // As SystemUI's NotificationInfo applies its choice.
+        NotificationChannel update=channel.copy();
+        update.setImportance(importance);
+        update.lockFields(NotificationChannel.USER_LOCKED_IMPORTANCE);
+        INotificationManager.Stub.asInterface(ServiceManager.getService("notification"))
+                .updateNotificationChannelForPackage(sbn.getPackageName(),sbn.getUid(),update);
+    }
+    private String smallIcon(Notification n) {
+        if(n.getSmallIcon()==null) return "";
+        try { return pixels(n.getSmallIcon().loadDrawable(context),48); } catch(Exception e) { return ""; }
     }
     private static JSONArray messages(Bundle extras) throws org.json.JSONException {
         JSONArray messages=new JSONArray();
@@ -300,6 +357,7 @@ public final class NotificationBridge extends NotificationListenerService implem
             if(type.equals("dismiss")) { if(entry.sbn.isClearable()) cancelNotification(entry.sbn.getKey()); return; }
             if(!type.equals("action")) return;
             String action=message.getString("action"); PendingIntent intent=null;
+            if(action.startsWith("x-denial-")) { control(entry,action); return; }
             if(action.equals("default")) intent=n.contentIntent;
             else if(action.startsWith("action-") && n.actions!=null) {
                 int index=Integer.parseInt(action.substring(7));

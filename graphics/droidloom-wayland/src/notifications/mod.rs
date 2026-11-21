@@ -128,6 +128,16 @@ struct Note {
     component: String,
     /// The 96 px large icon (a contact photo, say) as RGBA hex, or empty.
     large_icon: String,
+    /// The 48 px small icon (the status bar's, white on clear) as RGBA hex,
+    /// or empty.
+    #[serde(default)]
+    small_icon: String,
+    /// The channel's name, or empty.
+    #[serde(default)]
+    channel: String,
+    /// Whether the user may change the channel's importance.
+    #[serde(default)]
+    configurable: bool,
     /// The last MessagingStyle messages, oldest first.
     messages: Vec<ChatMessage>,
 }
@@ -136,6 +146,17 @@ struct Note {
 struct ChatMessage {
     sender: String,
     text: String,
+}
+impl Note {
+    /// The notification settings Denial may change through actions: the app's
+    /// settings always, the channel's importance when Android allows it.
+    fn controls(&self) -> Vec<&'static str> {
+        let mut controls = vec!["x-denial-settings"];
+        if self.configurable {
+            controls.extend(["x-denial-alerting", "x-denial-silent", "x-denial-turn-off"]);
+        }
+        controls
+    }
 }
 fn rgba_hex(hex: &str, size: usize) -> bool {
     hex.is_empty() || (hex.len() == size * size * 8 && hex.bytes().all(|b| b.is_ascii_hexdigit()))
@@ -160,6 +181,9 @@ impl Note {
             && self.urgency <= 2
             && rgba_hex(&self.icon, 48)
             && rgba_hex(&self.large_icon, 96)
+            && rgba_hex(&self.small_icon, 48)
+            && self.channel.len() <= 1024
+            && !self.channel.contains('\0')
             && self.group.len() <= 512
             && self.category.len() <= 64
             && (-1..=100).contains(&self.progress)
@@ -419,6 +443,18 @@ fn notify_hints(n: &Note, quiet: bool) -> (&'static str, HashMap<&'static str, V
             Value::from((size, size, size * 4, true, 8i32, 4i32, pixels)),
         );
     }
+    if let Ok(pixels) = hex::decode(&n.small_icon)
+        && !pixels.is_empty()
+    {
+        hints.insert(
+            "x-denial-small-icon",
+            Value::from((48i32, 48i32, 48i32 * 4, true, 8i32, 4i32, pixels)),
+        );
+    }
+    if !n.channel.is_empty() {
+        hints.insert("x-denial-channel", Value::from(n.channel.as_str()));
+    }
+    hints.insert("x-denial-controls", Value::from(n.controls()));
     if n.progress >= 0 {
         hints.insert("value", Value::from(n.progress));
     }
@@ -701,7 +737,14 @@ async fn serve(
                             .find(|r| r.id == Some(id))
                             .and_then(|r| r.note.as_ref())
                         {
-                            if note.actions.iter().any(|a| a.key == action) {
+                            if note.controls().contains(&action.as_str()) {
+                                // A setting: no app takes focus.
+                                if let Some(p) = peer.as_ref() {
+                                    if p.command(note, Some(&action)).await.is_err() {
+                                        peer = None;
+                                    }
+                                }
+                            } else if note.actions.iter().any(|a| a.key == action) {
                                 if let Some(token) = token {
                                     grants.grant(&note.package, token);
                                 }
