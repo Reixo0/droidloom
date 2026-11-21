@@ -54,6 +54,12 @@ final class DroidloomTaskBackend {
     // resize queued behind a running transition changes the bounds later
     // without any task-stack notification; input must follow it.
     private final IdentityHashMap<Task, Rect> mResizing = new IdentityHashMap<>();
+    // The windowing mode the host's window gives each task, under
+    // mService.mGlobalLock. Android re-resolves a task's mode when an activity
+    // starts in it (TaskLaunchParamsModifier inherits the freeform launch mode
+    // and the manifest's layout bounds), while the host window keeps its size
+    // and sends nothing: the mode is put back.
+    private final IdentityHashMap<Task, Integer> mHostModes = new IdentityHashMap<>();
     private long mResizeDeadline;
     // Set by snapshot() on mWorker: a resize is still pending.
     private boolean mResizePending;
@@ -217,6 +223,15 @@ final class DroidloomTaskBackend {
             }, true);
             mIncarnations.keySet().retainAll(live.keySet());
             mCreatedOver.keySet().retainAll(live.keySet());
+            mHostModes.keySet().retainAll(live.keySet());
+            for (Map.Entry<Task, Integer> entry : new ArrayList<>(mHostModes.entrySet())) {
+                final Task root = entry.getKey().getRootTask();
+                if (root != null && root.getWindowingMode() != entry.getValue()) {
+                    Slog.i(TAG, "Task " + entry.getKey().mTaskId
+                            + " left the host's windowing mode; restoring it");
+                    setHostWindowingMode(entry.getKey(), entry.getValue());
+                }
+            }
             mResizing.keySet().retainAll(live.keySet());
             mResizing.entrySet().removeIf(entry -> entry.getKey().getBounds().equals(entry.getValue()));
             if (SystemClock.uptimeMillis() > mResizeDeadline) mResizing.clear();
@@ -338,8 +353,9 @@ final class DroidloomTaskBackend {
                     // layout gives every app, is a fullscreen task as on a
                     // phone; it follows the display through rotations.
                     final boolean fills = fillsDisplay(task.getDisplayContent(), bounds);
-                    setHostWindowingMode(task,
-                            fills ? WINDOWING_MODE_FULLSCREEN : WINDOWING_MODE_FREEFORM);
+                    final int mode = fills ? WINDOWING_MODE_FULLSCREEN : WINDOWING_MODE_FREEFORM;
+                    mHostModes.put(task, mode);
+                    setHostWindowingMode(task, mode);
                     if (fills || task.getBounds().equals(bounds)) break;
                     task.setResizeMode(ActivityInfo.RESIZE_MODE_RESIZEABLE);
                     // Direct call in system_server: preserve ATMS's existing
