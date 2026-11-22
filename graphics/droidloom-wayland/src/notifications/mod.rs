@@ -23,8 +23,8 @@ use zbus::{Connection, MatchRule, Message, MessageStream, Proxy, message::Type, 
 const NAME: &str = "org.freedesktop.Notifications";
 const PATH: &str = "/org/freedesktop/Notifications";
 // Room for a 96 px large icon in hex next to the longest texts.
-// A player carries its art (≤ 96 KB hex), a 96 px icon and up to four 96 px
-// button icons: up to about 580 KB of JSON.
+// A player carries its art (≤ 300 KB hex), a 96 px icon and up to four 96 px
+// button icons: up to about 800 KB of JSON.
 const MAX_FRAME: usize = 1 << 20;
 const MAX_ACTIVE: usize = 256;
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -194,7 +194,7 @@ impl Media {
             && [&self.title, &self.artist, &self.album]
                 .into_iter()
                 .all(text)
-            && self.art.len() <= 96_000
+            && self.art.len() <= 300_000
             && self.art.len().is_multiple_of(2)
             && self.art.bytes().all(|b| b.is_ascii_hexdigit())
             && rgba_hex(&self.icon, 96)

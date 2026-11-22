@@ -7,17 +7,22 @@ import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
+import android.app.UriGrantsManager;
 import android.content.ComponentName;
+import android.content.ContentProvider;
+import android.content.ContentResolver;
 import android.content.Context;
 import android.content.Intent;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
+import android.graphics.ImageDecoder;
 import android.graphics.drawable.Drawable;
 import android.media.MediaMetadata;
 import android.media.session.MediaController;
 import android.media.session.MediaSession;
 import android.media.session.PlaybackState;
 import com.android.droidloom.runtime.HostChannel;
+import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.ServiceManager;
@@ -47,6 +52,10 @@ public final class NotificationBridge extends NotificationListenerService implem
     private static final int MAX_ACTIVE = 256;
     // Room for a 96 px large icon in hex next to the longest texts.
     private static final int MAX_FRAME = 1<<20;
+    /** The artwork's largest side, and its JPEG's size (the host's limit is the same in hex). */
+    private static final int ART_SIZE = 640, ART_BYTES = 150_000;
+    /** An app that does not answer for its artwork holds notifications up no longer than this. */
+    private static final long ART_TIMEOUT_MS = 1000;
     private final Context context;
     private final Handler main;
     private final Object lock = new Object();
@@ -76,11 +85,14 @@ public final class NotificationBridge extends NotificationListenerService implem
      * A media notification's session: every playback or metadata change reposts the
      * notification, so the host's player follows it.
      */
+    private final java.util.concurrent.ExecutorService artLoader=java.util.concurrent.Executors.newSingleThreadExecutor();
     private final class Media extends MediaController.Callback {
         final String key;
         final MediaController controller;
         /** The last artwork sent and its JPEG as hex, so an unchanged picture is not encoded again. */
         Bitmap art; String artHex="";
+        /** The last artwork loaded from a link, and the song and links it is for. */
+        Bitmap linked; String linkedFor="";
         Media(String key, MediaSession.Token token) {
             this.key=key; controller=new MediaController(context,token);
             controller.registerCallback(this,main);
@@ -293,7 +305,7 @@ public final class NotificationBridge extends NotificationListenerService implem
         String label=context.getPackageManager().getApplicationLabel(info).toString();
         NotificationChannel channel=entry.channel;
         Media session; synchronized(lock) { session=media.get(sbn.getKey()); }
-        JSONObject player=session==null?null:player(session,n,extras);
+        JSONObject player=session==null?null:player(session,sbn,n,extras);
         return new JSONObject().put("key",sbn.getKey()).put("version",entry.version).put("package",sbn.getPackageName())
                 .put("app",text(label,256)).put("title",title).put("body",body).put("actions",actions)
                 // Android HIGH requests a heads-up alert; it does not mean a critical
@@ -326,7 +338,7 @@ public final class NotificationBridge extends NotificationListenerService implem
      * The player SystemUI's media controls show for a session (MediaDataManager,
      * MediaActions): what plays, where it is, and the buttons the app offers.
      */
-    private JSONObject player(Media media, Notification n, Bundle extras) throws Exception {
+    private JSONObject player(Media media, StatusBarNotification sbn, Notification n, Bundle extras) throws Exception {
         MediaController controller=media.controller;
         PlaybackState state=controller.getPlaybackState();
         MediaMetadata meta=controller.getMetadata();
@@ -355,7 +367,7 @@ public final class NotificationBridge extends NotificationListenerService implem
         return new JSONObject().put("playing",playing).put("buffering",buffering)
                 .put("position",position).put("rate",Math.round((playing?speed:0)*1000)).put("duration",duration)
                 .put("title",title).put("artist",artist).put("album",first(meta,MediaMetadata.METADATA_KEY_ALBUM))
-                .put("art",art(media,meta,n))
+                .put("art",art(media,meta,sbn,n))
                 // The player draws the small icon at 24 dp: 96 px keeps it sharp.
                 .put("icon",smallIcon(n,96))
                 .put("play",(actions&(PlaybackState.ACTION_PLAY|PlaybackState.ACTION_PLAY_PAUSE))!=0)
@@ -370,10 +382,14 @@ public final class NotificationBridge extends NotificationListenerService implem
         for(String key:keys) { String value=text(meta.getText(key),1024); if(!value.isEmpty()) return value; }
         return "";
     }
-    /** The album art as a JPEG of at most 384 px, as hex; the session's, else the notification's large icon. */
-    private String art(Media media, MediaMetadata meta, Notification n) {
-        Bitmap bitmap=null;
-        if(meta!=null) bitmap=meta.getBitmap(MediaMetadata.METADATA_KEY_ART);
+    /**
+     * The album art as a JPEG of at most ART_SIZE px, as hex: from the song's art link (often
+     * larger than the session's bitmap, MediaDataLoader), else the session's bitmap, else the
+     * notification's large icon.
+     */
+    private String art(Media media, MediaMetadata meta, StatusBarNotification sbn, Notification n) {
+        Bitmap bitmap=meta==null?null:linkedArt(media,meta,sbn);
+        if(bitmap==null && meta!=null) bitmap=meta.getBitmap(MediaMetadata.METADATA_KEY_ART);
         if(bitmap==null && meta!=null) bitmap=meta.getBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART);
         if(bitmap==null && meta!=null) bitmap=meta.getBitmap(MediaMetadata.METADATA_KEY_DISPLAY_ICON);
         try {
@@ -383,18 +399,63 @@ public final class NotificationBridge extends NotificationListenerService implem
             }
             if(bitmap==null) { media.art=null; media.artHex=""; return ""; }
             if(media.art!=null && (media.art==bitmap || media.art.sameAs(bitmap))) return media.artHex;
-            float scale=Math.min(1f,384f/Math.max(bitmap.getWidth(),bitmap.getHeight()));
+            float scale=Math.min(1f,(float)ART_SIZE/Math.max(bitmap.getWidth(),bitmap.getHeight()));
             Bitmap small=Bitmap.createScaledBitmap(bitmap,Math.max(1,Math.round(bitmap.getWidth()*scale)),
                     Math.max(1,Math.round(bitmap.getHeight()*scale)),true);
             String hex="";
-            for(int quality:new int[]{85,60,40}) {
+            for(int quality:new int[]{90,80,60,40}) {
                 ByteArrayOutputStream out=new ByteArrayOutputStream();
                 small.compress(Bitmap.CompressFormat.JPEG,quality,out);
-                if(out.size()<=48000) { hex=hexBytes(out.toByteArray()); break; }
+                if(out.size()<=ART_BYTES) { hex=hexBytes(out.toByteArray()); break; }
             }
             if(small!=bitmap) small.recycle();
             media.art=bitmap; media.artHex=hex; return hex;
         } catch(Exception e) { return ""; }
+    }
+    /** The artwork behind the song's content links, or null. Links the app may not read are skipped. */
+    private Bitmap linkedArt(Media media, MediaMetadata meta, StatusBarNotification sbn) {
+        java.util.ArrayList<Uri> links=new java.util.ArrayList<>();
+        StringBuilder song=new StringBuilder();
+        for(String key:new String[]{MediaMetadata.METADATA_KEY_TITLE,MediaMetadata.METADATA_KEY_ALBUM})
+            song.append(meta.getText(key)).append('\n');
+        for(String key:new String[]{MediaMetadata.METADATA_KEY_ALBUM_ART_URI,MediaMetadata.METADATA_KEY_ART_URI,
+                MediaMetadata.METADATA_KEY_DISPLAY_ICON_URI}) {
+            String value=meta.getString(key);
+            if(value==null || value.isEmpty()) continue;
+            song.append(value).append('\n');
+            Uri link=Uri.parse(value);
+            if(ContentResolver.SCHEME_CONTENT.equals(link.getScheme())) links.add(link);
+        }
+        if(links.isEmpty()) { media.linked=null; media.linkedFor=""; return null; }
+        String wanted=song.toString();
+        if(media.linkedFor.equals(wanted)) return media.linked;
+        media.linked=null; media.linkedFor="";
+        java.util.concurrent.Future<Bitmap> load=artLoader.submit(() -> {
+            for(Uri link:links) {
+                try {
+                    UriGrantsManager.getService().checkGrantUriPermission_ignoreNonSystem(sbn.getUid(),
+                            sbn.getPackageName(),ContentProvider.getUriWithoutUserId(link),
+                            Intent.FLAG_GRANT_READ_URI_PERMISSION,
+                            ContentProvider.getUserIdFromUri(link,sbn.getNormalizedUserId()));
+                    return ImageDecoder.decodeBitmap(ImageDecoder.createSource(context.getContentResolver(),link),
+                            (decoder,info,source) -> {
+                        decoder.setAllocator(ImageDecoder.ALLOCATOR_SOFTWARE);
+                        int width=info.getSize().getWidth(), height=info.getSize().getHeight();
+                        float scale=Math.min(1f,(float)ART_SIZE/Math.max(width,height));
+                        decoder.setTargetSize(Math.max(1,Math.round(width*scale)),Math.max(1,Math.round(height*scale)));
+                    });
+                } catch(Exception e) { Log.w(TAG,"Artwork link unavailable: "+e.getClass().getSimpleName()); }
+            }
+            return null;
+        });
+        try {
+            media.linked=load.get(ART_TIMEOUT_MS,java.util.concurrent.TimeUnit.MILLISECONDS);
+            // A picture not there yet is asked for again with the session's next change.
+            if(media.linked!=null) media.linkedFor=wanted;
+        } catch(java.util.concurrent.TimeoutException e) {
+            load.cancel(true); media.linkedFor=wanted;
+        } catch(Exception e) { }
+        return media.linked;
     }
     /**
      * A custom action's icon as the media player's button shows it: at the
