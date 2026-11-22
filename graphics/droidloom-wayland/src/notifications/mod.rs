@@ -23,7 +23,9 @@ use zbus::{Connection, MatchRule, Message, MessageStream, Proxy, message::Type, 
 const NAME: &str = "org.freedesktop.Notifications";
 const PATH: &str = "/org/freedesktop/Notifications";
 // Room for a 96 px large icon in hex next to the longest texts.
-const MAX_FRAME: usize = 262144;
+// A player carries its art (≤ 96 KB hex), a 96 px icon and up to four 96 px
+// button icons: up to about 580 KB of JSON.
+const MAX_FRAME: usize = 1 << 20;
 const MAX_ACTIVE: usize = 256;
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -162,6 +164,10 @@ struct Media {
     album: String,
     /// The artwork as a JPEG in hex, or empty.
     art: String,
+    /// The app's small icon at 96 px (4 px per dp) as RGBA hex, or empty:
+    /// the player shows it larger than the status bar does.
+    #[serde(default)]
+    icon: String,
     play: bool,
     pause: bool,
     next: bool,
@@ -185,13 +191,20 @@ impl Media {
             && self.duration >= 0
             && self.duration <= 7 * 24 * 3_600_000
             && (-100_000..=100_000).contains(&self.rate)
-            && [&self.title, &self.artist, &self.album].into_iter().all(text)
+            && [&self.title, &self.artist, &self.album]
+                .into_iter()
+                .all(text)
             && self.art.len() <= 96_000
             && self.art.len().is_multiple_of(2)
             && self.art.bytes().all(|b| b.is_ascii_hexdigit())
+            && rgba_hex(&self.icon, 96)
             && self.custom.len() <= 4
             && self.custom.iter().all(|a| {
-                !a.id.is_empty() && a.id.len() <= 1024 && text(&a.id) && text(&a.label) && rgba_hex(&a.icon, 48)
+                !a.id.is_empty()
+                    && a.id.len() <= 1024
+                    && text(&a.id)
+                    && text(&a.label)
+                    && square_rgba_hex(&a.icon, 96)
             })
     }
 }
@@ -214,6 +227,16 @@ impl Note {
 }
 fn rgba_hex(hex: &str, size: usize) -> bool {
     hex.is_empty() || (hex.len() == size * size * 8 && hex.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+/// A square RGBA icon of any side up to [max] px (a custom action's, at the
+/// app's own size), or empty.
+fn square_rgba_hex(hex: &str, max: usize) -> bool {
+    if hex.is_empty() {
+        return true;
+    }
+    let pixels = hex.len() / 8;
+    let side = pixels.isqrt();
+    hex.len() % 8 == 0 && side >= 1 && side <= max && side * side == pixels && rgba_hex(hex, side)
 }
 impl Note {
     fn valid(&self) -> bool {
@@ -739,8 +762,7 @@ async fn serve(
                         for update in snapshots {
                             match update {
                                 Update::Snapshot(snapshot) => {
-                                    reconcile(&mut state, snapshot, &desktop, &mut players)
-                                        .await?
+                                    reconcile(&mut state, snapshot, &desktop, &mut players).await?
                                 }
                                 Update::Post(note) => {
                                     upsert(

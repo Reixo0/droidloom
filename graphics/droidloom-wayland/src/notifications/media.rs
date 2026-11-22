@@ -26,6 +26,9 @@ pub(super) type Commands = async_channel::Sender<serde_json::Value>;
 struct Track {
     app: String,
     desktop_entry: String,
+    /// The notification's small icon (white on clear, 48 px RGBA hex): the
+    /// player shows it tinted, as Android's does.
+    small_icon: String,
     media: Media,
     reported: Instant,
     /// Changes with the song, for `mpris:trackid` and `SetPosition`.
@@ -51,7 +54,9 @@ impl Track {
 }
 type Shared = Arc<Mutex<Track>>;
 fn lock(track: &Shared) -> MutexGuard<'_, Track> {
-    track.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    track
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 struct Root {
@@ -122,7 +127,8 @@ impl Player {
     }
     async fn play_pause(&self) {
         let playing = lock(&self.track).media.playing;
-        self.send(if playing { "pause" } else { "play" }, None).await;
+        self.send(if playing { "pause" } else { "play" }, None)
+            .await;
     }
     async fn stop(&self) {
         self.send("pause", None).await;
@@ -133,9 +139,13 @@ impl Player {
             if !track.media.seek {
                 return;
             }
-            track.position().saturating_add(offset).clamp(0, track.media.duration * 1000)
+            track
+                .position()
+                .saturating_add(offset)
+                .clamp(0, track.media.duration * 1000)
         };
-        self.send("seek", Some(("position", (target / 1000).into()))).await;
+        self.send("seek", Some(("position", (target / 1000).into())))
+            .await;
     }
     async fn set_position(&self, track_id: ObjectPath<'_>, position: i64) {
         {
@@ -147,7 +157,8 @@ impl Player {
                 return;
             }
         }
-        self.send("seek", Some(("position", (position / 1000).into()))).await;
+        self.send("seek", Some(("position", (position / 1000).into())))
+            .await;
     }
     fn open_uri(&self, _uri: &str) {}
     #[zbus(signal)]
@@ -193,7 +204,10 @@ impl Player {
         }
         put("xesam:title", Value::from(track.media.title.as_str()));
         if !track.media.artist.is_empty() {
-            put("xesam:artist", Value::from(vec![track.media.artist.as_str()]));
+            put(
+                "xesam:artist",
+                Value::from(vec![track.media.artist.as_str()]),
+            );
         }
         if !track.media.album.is_empty() {
             put("xesam:album", Value::from(track.media.album.as_str()));
@@ -249,7 +263,13 @@ impl Actions {
             );
         }
     }
-    /// Each button: its id, its label, and its 48 px icon as RGBA (or empty).
+    /// The app's small icon, 48 px RGBA (white on clear), or empty.
+    #[zbus(property)]
+    fn icon(&self) -> Vec<u8> {
+        hex::decode(&lock(&self.track).small_icon).unwrap_or_default()
+    }
+    /// Each button: its id, its label, and its square icon as RGBA (or empty),
+    /// 2 px per dp at the app's own size (48 px, 24 dp, from older bundles).
     #[zbus(property)]
     fn actions(&self) -> Vec<(String, String, Vec<u8>)> {
         lock(&self.track)
@@ -299,12 +319,20 @@ impl Players {
         let Some(media) = note.media.clone() else {
             return;
         };
-        if let Err(error) = self.apply(note, media, desktop_entry.unwrap_or_default()).await {
+        if let Err(error) = self
+            .apply(note, media, desktop_entry.unwrap_or_default())
+            .await
+        {
             eprintln!("Droidloom media: player unavailable ({error})");
         }
     }
 
-    async fn apply(&mut self, note: &Note, media: Media, desktop_entry: String) -> zbus::Result<()> {
+    async fn apply(
+        &mut self,
+        note: &Note,
+        media: Media,
+        desktop_entry: String,
+    ) -> zbus::Result<()> {
         let Some(live) = self.live.get_mut(&note.key) else {
             self.next += 1;
             self.tracks += 1;
@@ -313,6 +341,7 @@ impl Players {
             let track = Arc::new(Mutex::new(Track {
                 app: note.app.clone(),
                 desktop_entry,
+                small_icon: player_icon(note, &media),
                 media,
                 reported: Instant::now(),
                 id: self.tracks,
@@ -326,19 +355,28 @@ impl Players {
             let name = format!("org.mpris.MediaPlayer2.droidloom_{package}.i{}", self.next);
             let result = zbus::connection::Builder::session()?
                 .name(name.as_str())?
-                .serve_at(PATH, Root {
-                    track: track.clone(),
-                })?
-                .serve_at(PATH, Player {
-                    key: note.key.clone(),
-                    track: track.clone(),
-                    commands: self.commands.clone(),
-                })?
-                .serve_at(PATH, Actions {
-                    key: note.key.clone(),
-                    track: track.clone(),
-                    commands: self.commands.clone(),
-                })?
+                .serve_at(
+                    PATH,
+                    Root {
+                        track: track.clone(),
+                    },
+                )?
+                .serve_at(
+                    PATH,
+                    Player {
+                        key: note.key.clone(),
+                        track: track.clone(),
+                        commands: self.commands.clone(),
+                    },
+                )?
+                .serve_at(
+                    PATH,
+                    Actions {
+                        key: note.key.clone(),
+                        track: track.clone(),
+                        commands: self.commands.clone(),
+                    },
+                )?
                 .build()
                 .await;
             let conn = match result {
@@ -350,27 +388,36 @@ impl Players {
                     return Err(error);
                 }
             };
-            self.live.insert(note.key.clone(), Live {
-                conn,
-                name,
-                track,
-                art,
-            });
+            self.live.insert(
+                note.key.clone(),
+                Live {
+                    conn,
+                    name,
+                    track,
+                    art,
+                },
+            );
             return Ok(());
         };
         // What changed, decided under the lock; the signals go out after it.
-        let (metadata, status, abilities, actions, seeked) = {
+        let (metadata, status, abilities, actions, icon, seeked) = {
             let mut track = lock(&live.track);
             let old = &track.media;
-            let song = old.title != media.title
-                || old.artist != media.artist
-                || old.album != media.album;
+            let song =
+                old.title != media.title || old.artist != media.artist || old.album != media.album;
             let art_changed = old.art != media.art;
             let metadata = song || art_changed || old.duration != media.duration;
             let status = old.playing != media.playing;
             let abilities = (old.play, old.pause, old.next, old.previous, old.seek)
-                != (media.play, media.pause, media.next, media.previous, media.seek);
+                != (
+                    media.play,
+                    media.pause,
+                    media.next,
+                    media.previous,
+                    media.seek,
+                );
             let actions = old.custom != media.custom;
+            let icon = track.small_icon != player_icon(note, &media);
             // A jump away from where the position was heading: a seek.
             let expected = track.position() / 1000;
             let seeked = song || (expected - media.position).abs() > 1500;
@@ -388,9 +435,17 @@ impl Players {
                 track.art_url = url;
             }
             track.app.clone_from(&note.app);
+            track.small_icon = player_icon(note, &media);
             track.media = media;
             track.reported = Instant::now();
-            (metadata, status, abilities, actions, seeked.then(|| track.position()))
+            (
+                metadata,
+                status,
+                abilities,
+                actions,
+                icon,
+                seeked.then(|| track.position()),
+            )
         };
         let server = live.conn.object_server();
         let player = server.interface::<_, Player>(PATH).await?;
@@ -413,9 +468,15 @@ impl Players {
             Player::seeked(emitter, position).await?;
         }
         drop(iface);
-        if actions {
+        if actions || icon {
             let buttons = server.interface::<_, Actions>(PATH).await?;
-            buttons.get().await.actions_changed(buttons.signal_emitter()).await?;
+            let iface = buttons.get().await;
+            if actions {
+                iface.actions_changed(buttons.signal_emitter()).await?;
+            }
+            if icon {
+                iface.icon_changed(buttons.signal_emitter()).await?;
+            }
         }
         Ok(())
     }
@@ -441,6 +502,16 @@ impl Drop for Players {
                 let _ = fs::remove_file(path);
             }
         }
+    }
+}
+
+/// The icon the player shows: the 96 px one the player carries, else the
+/// notification's 48 px small icon.
+fn player_icon(note: &Note, media: &Media) -> String {
+    if media.icon.is_empty() {
+        note.small_icon.clone()
+    } else {
+        media.icon.clone()
     }
 }
 

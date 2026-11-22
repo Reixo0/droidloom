@@ -46,7 +46,7 @@ public final class NotificationBridge extends NotificationListenerService implem
     private static final String TAG = "DroidloomNotifications";
     private static final int MAX_ACTIVE = 256;
     // Room for a 96 px large icon in hex next to the longest texts.
-    private static final int MAX_FRAME = 262144;
+    private static final int MAX_FRAME = 1<<20;
     private final Context context;
     private final Handler main;
     private final Object lock = new Object();
@@ -356,6 +356,8 @@ public final class NotificationBridge extends NotificationListenerService implem
                 .put("position",position).put("rate",Math.round((playing?speed:0)*1000)).put("duration",duration)
                 .put("title",title).put("artist",artist).put("album",first(meta,MediaMetadata.METADATA_KEY_ALBUM))
                 .put("art",art(media,meta,n))
+                // The player draws the small icon at 24 dp: 96 px keeps it sharp.
+                .put("icon",smallIcon(n,96))
                 .put("play",(actions&(PlaybackState.ACTION_PLAY|PlaybackState.ACTION_PLAY_PAUSE))!=0)
                 .put("pause",(actions&(PlaybackState.ACTION_PAUSE|PlaybackState.ACTION_PLAY_PAUSE))!=0)
                 .put("next",(actions&PlaybackState.ACTION_SKIP_TO_NEXT)!=0)
@@ -394,11 +396,29 @@ public final class NotificationBridge extends NotificationListenerService implem
             media.art=bitmap; media.artHex=hex; return hex;
         } catch(Exception e) { return ""; }
     }
-    /** A custom action's icon, from the app's resources, 48 px RGBA as hex. */
+    /**
+     * A custom action's icon as the media player's button shows it: at the
+     * drawable's own size (centerInside never enlarges it), as a square of
+     * its larger side at 2 px per dp (at most 48 dp, the button), RGBA as
+     * hex. Without an intrinsic size it is 24 dp (48 px).
+     */
     private String actionIcon(String pkg,int id) {
         try {
-            Drawable drawable=context.getPackageManager().getResourcesForApplication(pkg).getDrawable(id,null);
-            return drawable==null?"":pixels(drawable,48);
+            android.content.res.Resources res=context.getPackageManager().getResourcesForApplication(pkg);
+            Drawable drawable=res.getDrawable(id,null);
+            if(drawable==null) return "";
+            float toPixels=2f/res.getDisplayMetrics().density;
+            int width=drawable.getIntrinsicWidth(), height=drawable.getIntrinsicHeight();
+            int w=width>0?Math.min(96,Math.max(1,Math.round(width*toPixels))):48;
+            int h=height>0?Math.min(96,Math.max(1,Math.round(height*toPixels))):48;
+            final int size=Math.max(w,h);
+            int left=(size-w)/2, top=(size-h)/2;
+            Bitmap bitmap=Bitmap.createBitmap(size,size,Bitmap.Config.ARGB_8888);
+            drawable.setBounds(left,top,left+w,top+h); drawable.draw(new Canvas(bitmap));
+            int[] pixels=new int[size*size]; bitmap.getPixels(pixels,0,size,0,0,size,size); bitmap.recycle();
+            StringBuilder out=new StringBuilder(size*size*8);
+            for(int pixel:pixels) { hex(out,(pixel>>16)&255); hex(out,(pixel>>8)&255); hex(out,pixel&255); hex(out,(pixel>>>24)&255); }
+            return out.toString();
         } catch(Exception e) { return ""; }
     }
     private static String hexBytes(byte[] bytes) {
@@ -470,9 +490,10 @@ public final class NotificationBridge extends NotificationListenerService implem
         INotificationManager.Stub.asInterface(ServiceManager.getService("notification"))
                 .updateNotificationChannelForPackage(sbn.getPackageName(),sbn.getUid(),update);
     }
-    private String smallIcon(Notification n) {
+    private String smallIcon(Notification n) { return smallIcon(n,48); }
+    private String smallIcon(Notification n,int size) {
         if(n.getSmallIcon()==null) return "";
-        try { return pixels(n.getSmallIcon().loadDrawable(context),48); } catch(Exception e) { return ""; }
+        try { return pixels(n.getSmallIcon().loadDrawable(context),size); } catch(Exception e) { return ""; }
     }
     private static JSONArray messages(Bundle extras) throws org.json.JSONException {
         JSONArray messages=new JSONArray();

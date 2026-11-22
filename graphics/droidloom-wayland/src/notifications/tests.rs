@@ -576,6 +576,7 @@ fn media_players_are_validated() {
         artist: "Artist".into(),
         album: String::new(),
         art: "ffd8ffd9".into(),
+        icon: String::new(),
         play: true,
         pause: true,
         next: true,
@@ -593,4 +594,16 @@ fn media_players_are_validated() {
     n.media.as_mut().unwrap().art = String::new();
     n.media.as_mut().unwrap().custom[0].icon = "00".into();
     assert!(!n.valid());
+}
+
+#[test]
+fn custom_action_icons_are_squares_up_to_96_px() {
+    let side = |n: usize| "7f".repeat(n * n * 4);
+    assert!(square_rgba_hex("", 96));
+    assert!(square_rgba_hex(&side(48), 96));
+    assert!(square_rgba_hex(&side(64), 96));
+    assert!(square_rgba_hex(&side(96), 96));
+    assert!(!square_rgba_hex(&side(97), 96));
+    assert!(!square_rgba_hex(&"7f".repeat(48 * 40 * 4), 96));
+    assert!(!square_rgba_hex(&"zz".repeat(48 * 48 * 4), 96));
 }
