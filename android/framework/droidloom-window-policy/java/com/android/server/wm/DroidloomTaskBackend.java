@@ -61,6 +61,10 @@ final class DroidloomTaskBackend {
     // and sends nothing: the mode is put back.
     private final IdentityHashMap<Task, Integer> mHostModes = new IdentityHashMap<>();
     private long mResizeDeadline;
+    // Tasks the host closed, with the time they are removed at the latest,
+    // under mService.mGlobalLock: removed once their activities have stopped.
+    private final IdentityHashMap<Task, Long> mClosing = new IdentityHashMap<>();
+    private static final long CLOSE_TIMEOUT_MS = 1000;
     // Set by snapshot() on mWorker: a resize is still pending.
     private boolean mResizePending;
     // Accessed only on mWorker. Background tasks retain their existing host window.
@@ -337,6 +341,8 @@ final class DroidloomTaskBackend {
                     || task.getDisplayId() != 0 || !task.isLeafTask()
                     || !task.isActivityTypeStandard() || task.realActivity == null
                     || !Long.valueOf(command[2]).equals(mIncarnations.get(task))) return;
+            // On its way out: the host's late focus or show must not revive it.
+            if (mClosing.containsKey(task)) return;
             switch ((int) command[4]) {
                 case 1:
                     // Host focus implies the window is shown.
@@ -367,20 +373,12 @@ final class DroidloomTaskBackend {
                     }
                     break;
                 case 3:
-                    mService.removeTask(task, "droidloom-host-close");
+                    closeTask(task);
                     break;
                 case 4:
                 case 5:
-                    setHostHidden(task, command[4] == 4);
-                    if (command[4] == 4) {
-                        // Hiding a task moves Android's focus to the one below
-                        // it, such as the app behind a dialog. That is the
-                        // host's doing, not that app asking for the front.
-                        final Task below =
-                                mService.mRootWindowContainer.getTopDisplayFocusedRootTask();
-                        final Task leaf = below == null ? null : below.getTopLeafTask();
-                        if (leaf != null && leaf != task) mHostFocused = leaf;
-                    }
+                    if (command[4] == 4) hideTask(task);
+                    else setHostHidden(task, false);
                     break;
                 case 6:
                     if (command[5] != 0 && (command[5] < 72 || command[5] > 1280)) return;
@@ -470,6 +468,55 @@ final class DroidloomTaskBackend {
         mService.mRootWindowContainer.ensureActivitiesVisible();
         mService.mRootWindowContainer.resumeFocusedTasksTopActivities();
         mService.mChainTracker.end();
+    }
+
+    private void hideTask(Task task) {
+        setHostHidden(task, true);
+        // Hiding a task moves Android's focus to the one below it, such as
+        // the app behind a dialog. That is the host's doing, not that app
+        // asking for the front.
+        final Task below = mService.mRootWindowContainer.getTopDisplayFocusedRootTask();
+        final Task leaf = below == null ? null : below.getTopLeafTask();
+        if (leaf != null && leaf != task) mHostFocused = leaf;
+    }
+
+    /**
+     * Removes a task as a phone's recents do: there the swiped app has already
+     * stopped. An app told of its task's removal while still in front may keep
+     * going (Spotify keeps playing), so it is hidden and stopped first.
+     */
+    private void closeTask(Task task) {
+        if (!hasUnstoppedActivity(task)) {
+            mService.removeTask(task, "droidloom-host-close");
+            return;
+        }
+        mClosing.put(task, SystemClock.uptimeMillis() + CLOSE_TIMEOUT_MS);
+        // Before hiding, which may throw: the task is removed all the same.
+        mWorker.postDelayed(() -> finishClose(task), 50);
+        hideTask(task);
+    }
+
+    private void finishClose(Task task) {
+        synchronized (mService.mGlobalLock) {
+            final Long deadline = mClosing.get(task);
+            if (deadline == null) return;
+            if (task.isAttached() && hasUnstoppedActivity(task)
+                    && SystemClock.uptimeMillis() < deadline) {
+                mWorker.postDelayed(() -> finishClose(task), 50);
+                return;
+            }
+            mClosing.remove(task);
+            if (!task.isAttached()) return;
+            try {
+                mService.removeTask(task, "droidloom-host-close");
+            } catch (RuntimeException error) {
+                Slog.w(TAG, "Could not remove closed task " + task.mTaskId, error);
+            }
+        }
+    }
+
+    private static boolean hasUnstoppedActivity(Task task) {
+        return task.getActivity(record -> !record.finishing && !record.mAppStopped) != null;
     }
 
     /**
