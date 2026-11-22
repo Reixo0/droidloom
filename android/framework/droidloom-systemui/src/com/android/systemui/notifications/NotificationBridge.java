@@ -122,10 +122,17 @@ public final class NotificationBridge extends NotificationListenerService implem
         try { media.put(sbn.getKey(),new Media(sbn.getKey(),token)); }
         catch(Exception e) { Log.w(TAG,"Media session unavailable: "+e.getClass().getSimpleName()); }
     }
-    public NotificationBridge(Context context) { this.context=context; main=new Handler(context.getMainLooper()); }
+    private final ActiveApps activeApps;
+    /** The active apps changed since they were last sent; under lock. */
+    private boolean appsDirty;
+    public NotificationBridge(Context context) {
+        this.context=context; main=new Handler(context.getMainLooper());
+        activeApps=new ActiveApps(context,() -> { synchronized(lock) { appsDirty=true; lock.notifyAll(); } });
+    }
     public void start() {
         try {
             registerAsSystemService(context, new ComponentName(context, NotificationBridge.class), UserHandle.USER_SYSTEM);
+            activeApps.start();
             Log.i(TAG, "DROIDLOOM_NOTIFICATIONS_ABI=4;");
             Thread worker = new Thread(this::connect, "droidloom-notifications");
             worker.setDaemon(true); worker.start();
@@ -216,7 +223,7 @@ public final class NotificationBridge extends NotificationListenerService implem
                 connected=true;
                 Thread writer=new Thread(() -> writeSnapshots(current,out),"droidloom-notifications-out");
                 writer.setDaemon(true); writer.start();
-                synchronized(lock) { dirty=true; lock.notifyAll(); }
+                synchronized(lock) { dirty=true; appsDirty=true; lock.notifyAll(); }
                 try {
                     while(!stopped) {
                         int length=input.readInt();
@@ -244,9 +251,15 @@ public final class NotificationBridge extends NotificationListenerService implem
             while(!stopped && connected) {
                 ArrayList<Entry> entries;
                 HashSet<String> alerts;
+                boolean apps;
                 synchronized(lock) {
-                    while(!stopped && connected && (!dirty || !listening)) lock.wait();
+                    while(!stopped && connected && !appsDirty && (!dirty || !listening)) lock.wait();
                     if(stopped || !connected) return;
+                    apps=appsDirty; appsDirty=false;
+                }
+                if(apps) send(out,new JSONObject().put("type","active").put("apps",activeApps.list()));
+                synchronized(lock) {
+                    if(!dirty || !listening) continue;
                     entries=new ArrayList<>(active.values()); dirty=false;
                     alerts=new HashSet<>(alerting); alerting.clear();
                 }
@@ -588,6 +601,7 @@ public final class NotificationBridge extends NotificationListenerService implem
     private void command(JSONObject message) {
         try {
             if("media".equals(message.optString("type"))) { mediaCommand(message); return; }
+            if("stop".equals(message.optString("type"))) { activeApps.stop(message.getString("package")); return; }
             Entry entry;
             synchronized(lock) { entry=active.get(message.getString("key")); }
             if(entry==null || !entry.version.equals(message.getString("version"))) return;

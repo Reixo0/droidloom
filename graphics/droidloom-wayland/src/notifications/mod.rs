@@ -300,6 +300,8 @@ enum Frame {
     Post { notification: Note },
     Remove { key: String, version: String },
     End,
+    /// The apps Android's task manager lists.
+    Active { apps: Vec<active::App> },
 }
 struct Peer {
     socket: Async<UnixStream>,
@@ -313,6 +315,7 @@ enum Update {
     Snapshot(BTreeMap<String, Note>),
     Post(Note),
     Remove { key: String, version: String },
+    Active(Vec<active::App>),
 }
 impl Peer {
     fn ingest(&mut self, bytes: &[u8]) -> Result<Vec<Update>> {
@@ -333,6 +336,9 @@ impl Peer {
             self.buffer.drain(..length + 4);
             match frame {
                 Frame::Hello { abi: 4 } if !self.hello => self.hello = true,
+                Frame::Active { apps } if self.hello && active::valid(&apps) => {
+                    complete.push(Update::Active(apps));
+                }
                 Frame::Begin if self.hello && self.snapshot.is_none() => {
                     self.snapshot = Some(BTreeMap::new())
                 }
@@ -709,10 +715,14 @@ async fn serve(
     state.owner(owner);
     let mut peer: Option<Peer> = None;
     let (commands, requests) = async_channel::bounded(32);
+    let active = active::Service::start(&conn, commands.clone()).await;
     let mut players = media::Players::new(commands);
     // Denial emits ActivationToken right before ActionInvoked for one tap.
     let mut activation: Option<(u32, String)> = None;
     loop {
+        if peer.is_none() {
+            active.set(Vec::new()).await;
+        }
         let event = future::race(
             future::race(
                 async { Event::Accept(listener.accept().await) },
@@ -764,6 +774,7 @@ async fn serve(
                                 Update::Snapshot(snapshot) => {
                                     reconcile(&mut state, snapshot, &desktop, &mut players).await?
                                 }
+                                Update::Active(apps) => active.set(apps).await,
                                 Update::Post(note) => {
                                     upsert(
                                         &mut state,
@@ -923,6 +934,7 @@ fn authenticated_peer(s: &UnixStream, expected_uid: u32) -> io::Result<bool> {
     Ok(cred.uid == expected_uid)
 }
 
+mod active;
 mod media;
 #[cfg(test)]
 mod tests;

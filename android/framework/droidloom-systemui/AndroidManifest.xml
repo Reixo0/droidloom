@@ -10,6 +10,11 @@
     <uses-permission android:name="android.permission.INTERACT_ACROSS_USERS_FULL" />
     <uses-permission android:name="android.permission.READ_CLIPBOARD_IN_BACKGROUND" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_ROUTING" />
+    <!-- The task manager: which apps are active, and stopping them. -->
+    <uses-permission android:name="android.permission.MANAGE_ACTIVITY_TASKS" />
+    <uses-permission android:name="android.permission.DEVICE_POWER" />
+    <!-- Their names, icons and stop rules: other apps are invisible without it. -->
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
     <application android:label="Droidloom SystemUI" android:persistent="true"
         android:allowBackup="false" android:allowClearUserData="false"
         android:hardwareAccelerated="false" android:directBootAware="true"

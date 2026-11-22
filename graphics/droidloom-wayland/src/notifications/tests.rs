@@ -607,3 +607,21 @@ fn custom_action_icons_are_squares_up_to_96_px() {
     assert!(!square_rgba_hex(&"7f".repeat(48 * 40 * 4), 96));
     assert!(!square_rgba_hex(&"zz".repeat(48 * 48 * 4), 96));
 }
+
+#[test]
+fn active_apps_are_bounded_and_listed_once() {
+    let app = |package: &str, component: &str| super::active::App {
+        package: package.into(),
+        label: "App".into(),
+        component: component.into(),
+        since: 1,
+        stoppable: true,
+    };
+    assert!(super::active::valid(&[]));
+    assert!(super::active::valid(&[app("a.b", "a.b/.Main"), app("c.d", "")]));
+    assert!(!super::active::valid(&[app("a.b", ""), app("a.b", "")]));
+    assert!(!super::active::valid(&[app("a.b", "c.d/.Main")]));
+    assert!(!super::active::valid(&[app("", "")]));
+    let many: Vec<_> = (0..65).map(|i| app(&format!("a.b{i}"), "")).collect();
+    assert!(!super::active::valid(&many));
+}
