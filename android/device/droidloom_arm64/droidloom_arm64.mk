@@ -111,7 +111,10 @@ PRODUCT_COPY_FILES += \
 # The V4L2 store (default) takes linear buffers from DMA-BUF heaps (BLOB) and
 # its own V4L2 buffer pools (libc2plugin_store); 8 decoders at a time, as its
 # media_codecs_c2.xml says.
+# The device's own density, which app stores pick an app's graphics by. Unset,
+# Android takes 160 (mdpi) and apps come with low-resolution images.
 PRODUCT_VENDOR_PROPERTIES += \
+    ro.sf.lcd_density=430 \
     debug.graphics.game_default_frame_rate.disabled=true \
     debug.graphics.angle.force_enable_angle_for_games=1 \
     ro.egl.blobcache.multifile=true \
