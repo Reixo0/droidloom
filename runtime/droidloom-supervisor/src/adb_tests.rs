@@ -149,6 +149,7 @@ fn retries_failed_connects_and_disconnects_only_its_transport() {
     let connection = AdbConnection::watch(
         endpoint.into(),
         Duration::from_millis(20),
+        Duration::from_millis(20),
         move |operation| {
             worker_calls
                 .lock()
@@ -177,6 +178,29 @@ fn retries_failed_connects_and_disconnects_only_its_transport() {
     assert_eq!(calls.lines().last(), Some("disconnect 10.177.0.2:5555"));
     assert!(!calls.contains("kill-server"));
     assert!(!calls.contains("disconnect \n"));
+}
+
+#[test]
+fn checks_a_connected_transport_only_at_the_connected_interval() {
+    let connects = Arc::new(Mutex::new(0_u32));
+    let worker_connects = Arc::clone(&connects);
+    let endpoint = "10.177.0.2:5555";
+    let connection = AdbConnection::watch(
+        endpoint.into(),
+        Duration::from_millis(5),
+        Duration::from_secs(60),
+        move |operation| {
+            if operation == "connect" {
+                *worker_connects.lock().unwrap() += 1;
+            }
+            Ok(format!("already connected to {endpoint}"))
+        },
+    )
+    .unwrap();
+    wait_until(|| *connects.lock().unwrap() >= 1);
+    thread::sleep(Duration::from_millis(100));
+    drop(connection);
+    assert_eq!(*connects.lock().unwrap(), 1);
 }
 
 #[test]
@@ -262,8 +286,13 @@ fn real_adb_registers_reconnects_selects_by_device_name_and_disconnects() {
     validate_public_key(&key).unwrap();
     let watcher_client = client.clone();
     let connection =
-        AdbConnection::start_at(watcher_client, endpoint.clone(), Duration::from_millis(100))
-            .unwrap();
+        AdbConnection::start_at(
+            watcher_client,
+            endpoint.clone(),
+            Duration::from_millis(100),
+            Duration::from_millis(100),
+        )
+        .unwrap();
     let devices = || client.server_request("host:devices-l").unwrap_or_default();
     wait_until(|| {
         let list = devices();

@@ -23,6 +23,11 @@ pub(crate) const KEYS_FILE: &str = "keys";
 const ADB: &str = "/usr/bin/adb";
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
 const RETRY_INTERVAL: Duration = Duration::from_secs(2);
+/// Once connected, the transport is only checked now and then: every check
+/// wakes the host and talks to adbd, which kept a phone that had just woken
+/// from sleep busy for seconds. The ADB server reconnects a dropped TCP
+/// transport by itself; this check covers a restarted server.
+const CONNECTED_INTERVAL: Duration = Duration::from_secs(30);
 const MAX_OUTPUT: u64 = 8192;
 
 /// Android init owns the non-root adbd service and its restarts.
@@ -449,11 +454,21 @@ impl AdbConnection {
     }
 
     pub(crate) fn start(client: AdbClient) -> io::Result<Self> {
-        Self::start_at(client, ENDPOINT.to_owned(), RETRY_INTERVAL)
+        Self::start_at(
+            client,
+            ENDPOINT.to_owned(),
+            RETRY_INTERVAL,
+            CONNECTED_INTERVAL,
+        )
     }
 
-    fn start_at(client: AdbClient, endpoint: String, interval: Duration) -> io::Result<Self> {
-        Self::watch(endpoint.clone(), interval, move |operation| {
+    fn start_at(
+        client: AdbClient,
+        endpoint: String,
+        interval: Duration,
+        connected_interval: Duration,
+    ) -> io::Result<Self> {
+        Self::watch(endpoint.clone(), interval, connected_interval, move |operation| {
             if operation == "connect" {
                 client.ensure_server()?;
             }
@@ -461,9 +476,12 @@ impl AdbConnection {
         })
     }
 
+    /// Connect every `interval` until connected, then check every
+    /// `connected_interval`.
     fn watch(
         endpoint: String,
         interval: Duration,
+        connected_interval: Duration,
         mut transport_command: impl FnMut(&str) -> io::Result<String> + Send + 'static,
     ) -> io::Result<Self> {
         let (stop, receiver) = mpsc::channel();
@@ -480,7 +498,8 @@ impl AdbConnection {
                         eprintln!("droidloom-supervisor: ADB connected to {endpoint}");
                     }
                     connected = online;
-                    if receiver.recv_timeout(interval) != Err(mpsc::RecvTimeoutError::Timeout) {
+                    let wait = if connected { connected_interval } else { interval };
+                    if receiver.recv_timeout(wait) != Err(mpsc::RecvTimeoutError::Timeout) {
                         break;
                     }
                 }
