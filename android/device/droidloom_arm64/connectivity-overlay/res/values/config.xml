@@ -1,11 +1,18 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <!--
-      The development supervisor creates the matching 10.177.0.1/30 gateway.
-      Public resolvers keep the cell independent from the host's resolver
-      implementation while packets still use the host's existing uplink.
+      The development supervisor creates the matching gateways, one link per
+      kind of host uplink, so Android has a network per radio as on a phone:
+      eth0 is Wi-Fi (transport 1, unmetered), eth1 mobile data (transport 0,
+      metered: no NOT_METERED). Capabilities: 11 NOT_METERED, 12 INTERNET,
+      13 NOT_RESTRICTED, 14 TRUSTED, 15 NOT_VPN, 28 NOT_VCN_MANAGED,
+      37 NOT_BANDWIDTH_CONSTRAINED. Android ranks Wi-Fi above mobile data and
+      keeps mobile data up in the background, as it does on a phone; the host
+      plugs a link out while its uplink is gone. Public resolvers keep the cell
+      independent from the host's resolver implementation.
     -->
     <string-array translatable="false" name="config_ethernet_interfaces">
-        <item>eth0;*;ip=10.177.0.2/30 gateway=10.177.0.1 dns=1.1.1.1,8.8.8.8</item>
+        <item>eth0;11,12,13,14,15,28,37;ip=10.177.0.2/30 gateway=10.177.0.1 dns=1.1.1.1,8.8.8.8;1</item>
+        <item>eth1;12,13,14,15,28,37;ip=10.177.0.6/30 gateway=10.177.0.5 dns=1.1.1.1,8.8.8.8;0</item>
     </string-array>
 </resources>

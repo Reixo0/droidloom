@@ -1,10 +1,18 @@
 //! Bounded network plumbing for the executable development cell.
 //!
-//! Linux remains the network implementation. This module only creates a veth
-//! pair, assigns the host gateway, and installs narrowly named nftables rules
-//! for outbound forwarding/NAT. Android owns `eth0` and its normal networking
-//! services inside the private namespace. Each side is one `ip -batch` and the
-//! rules are one `nft` transaction, so a cell start spawns three helpers.
+//! Linux remains the network implementation. This module only creates veth
+//! pairs, assigns the host gateways, and installs narrowly named nftables rules
+//! for outbound forwarding/NAT. Android owns `eth0` and `eth1` and its normal
+//! networking services inside the private namespace. Each side is one
+//! `ip -batch` and the rules are one `nft` transaction, so a cell start spawns
+//! three helpers.
+//!
+//! There is one link per kind of host uplink, as a phone has one network per
+//! radio: `eth0` stands for Wi-Fi (unmetered) and `eth1` for mobile data
+//! (metered); Android's connectivity overlay gives each its transport. The
+//! host decides which uplink each link's traffic leaves through and plugs a
+//! link out while its uplink is gone, so Android switches networks the way it
+//! does on a phone, without dropping the connections of the one that stays.
 
 use std::fs;
 use std::io::Write;
@@ -14,8 +22,30 @@ use std::process::Stdio;
 use crate::CellSpec;
 use crate::development::DevelopmentError;
 
-const HOST_IPV4_CIDR: &str = "10.177.0.1/30";
-const CELL_IPV4_CIDR: &str = "10.177.0.2/32";
+/// One veth pair: the host end's name prefix and address, Android's end.
+struct Link {
+    prefix: &'static str,
+    host_cidr: &'static str,
+    cell_cidr: &'static str,
+    peer: &'static str,
+}
+
+/// Wi-Fi first: `adb` and the host's own services reach Android on its
+/// address.
+const LINKS: [Link; 2] = [
+    Link {
+        prefix: "dlh",
+        host_cidr: "10.177.0.1/30",
+        cell_cidr: "10.177.0.2/32",
+        peer: "eth0",
+    },
+    Link {
+        prefix: "dlm",
+        host_cidr: "10.177.0.5/30",
+        cell_cidr: "10.177.0.6/32",
+        peer: "eth1",
+    },
+];
 const IPV4_FORWARD_PATH: &str = "/proc/sys/net/ipv4/ip_forward";
 const IPV4_FORWARD_STATE_FILE: &str = "host-ipv4-forward.before";
 const NETNS_DIR: &str = "/run/netns";
@@ -24,7 +54,7 @@ const NET_CLASS_DIR: &str = "/sys/class/net";
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct NetworkNames {
     namespace: String,
-    host_interface: String,
+    host_interfaces: [String; 2],
     filter_table: String,
     nat_table: String,
 }
@@ -34,7 +64,7 @@ impl NetworkNames {
         let uid = spec.host_uid;
         Self {
             namespace: format!("droidloom-u{uid}"),
-            host_interface: format!("dlh{uid}"),
+            host_interfaces: LINKS.map(|link| format!("{}{uid}", link.prefix)),
             filter_table: format!("droidloom_u{uid}"),
             nat_table: format!("droidloom_u{uid}_nat"),
         }
@@ -52,14 +82,14 @@ pub(crate) struct DevelopmentNetwork {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum NetworkResource {
     Namespace,
-    HostInterface,
+    HostInterface(usize),
     FilterTable,
     NatTable,
-    UfwForwardRule,
+    UfwForwardRule(usize),
 }
 
 impl DevelopmentNetwork {
-    /// Create the private namespace and its single outbound kernel path.
+    /// Create the private namespace and its outbound kernel paths.
     pub(crate) fn create(spec: &CellSpec) -> Result<Self, DevelopmentError> {
         let mut network = Self {
             names: NetworkNames::for_spec(spec),
@@ -95,8 +125,10 @@ impl DevelopmentNetwork {
         // Add only our exact outbound source/interface rule to its user chain.
         // It is transient and never modifies UFW's persistent configuration.
         if ufw_chain_exists()? {
-            run("iptables", ufw_rule_arguments("-I", &self.names))?;
-            self.resources.push(NetworkResource::UfwForwardRule);
+            for index in 0..LINKS.len() {
+                run("iptables", ufw_rule_arguments("-I", &self.names, index))?;
+                self.resources.push(NetworkResource::UfwForwardRule(index));
+            }
         }
         Ok(())
     }
@@ -104,34 +136,34 @@ impl DevelopmentNetwork {
     fn setup_links(&mut self) -> Result<(), DevelopmentError> {
         let NetworkNames {
             namespace,
-            host_interface,
+            host_interfaces,
             ..
         } = &self.names;
-        // The peer is created inside the namespace as eth0, so it never
-        // appears on the host under a temporary name.
-        let host = run_script(
-            "ip",
-            ["-batch", "-"],
-            &format!(
-                "netns add {namespace}\n\
-                 link add {host_interface} type veth peer name eth0 netns {namespace}\n\
-                 address add {HOST_IPV4_CIDR} dev {host_interface}\n\
-                 link set {host_interface} up\n"
-            ),
-        );
+        // Each peer is created inside the namespace under its Android name,
+        // so it never appears on the host under a temporary name.
+        let mut script = format!("netns add {namespace}\n");
+        let mut cell_script = String::from("link set lo up\n");
+        for (link, host) in LINKS.iter().zip(host_interfaces) {
+            let (peer, cidr) = (link.peer, link.host_cidr);
+            script.push_str(&format!(
+                "link add {host} type veth peer name {peer} netns {namespace}\n\
+                 address add {cidr} dev {host}\n\
+                 link set {host} up\n"
+            ));
+            cell_script.push_str(&format!("link set {peer} up\n"));
+        }
+        let host = run_script("ip", ["-batch", "-"], &script);
         // A batch stops at its first failing line; own whatever it created.
         if namespace_exists(namespace) {
             self.resources.push(NetworkResource::Namespace);
         }
-        if link_exists(host_interface) {
-            self.resources.push(NetworkResource::HostInterface);
+        for (index, interface) in host_interfaces.iter().enumerate() {
+            if link_exists(interface) {
+                self.resources.push(NetworkResource::HostInterface(index));
+            }
         }
         host?;
-        run_script(
-            "ip",
-            ["-n", namespace, "-batch", "-"],
-            "link set lo up\nlink set eth0 up\n",
-        )
+        run_script("ip", ["-n", namespace, "-batch", "-"], &cell_script)
     }
 
     fn enable_forwarding(&mut self) -> Result<(), DevelopmentError> {
@@ -150,11 +182,29 @@ impl DevelopmentNetwork {
     /// Install both tables in one nftables transaction: all of it or nothing.
     fn setup_rules(&mut self) -> Result<(), DevelopmentError> {
         let NetworkNames {
-            host_interface: host,
+            host_interfaces,
             filter_table,
             nat_table,
             ..
         } = &self.names;
+        let (mut input, mut forward, mut nat) = (String::new(), String::new(), String::new());
+        for (index, (link, host)) in LINKS.iter().zip(host_interfaces).enumerate() {
+            let cell = link.cell_cidr;
+            // adb and the host's services answer on the Wi-Fi link only
+            if index == 0 {
+                input.push_str(&format!(
+                    "\t\tiifname \"{host}\" ip saddr {cell} tcp sport 5555 ct state established accept\n"
+                ));
+            }
+            input.push_str(&format!("\t\tiifname \"{host}\" drop\n"));
+            forward.push_str(&format!(
+                "\t\tiifname \"{host}\" ip saddr != {cell} drop\n\
+                 \t\tiifname \"{host}\" ip saddr {cell} accept\n\
+                 \t\toifname \"{host}\" ip daddr {cell} ct state established,related accept\n\
+                 \t\toifname \"{host}\" drop\n"
+            ));
+            nat.push_str(&format!("\t\tip saddr {cell} masquerade\n"));
+        }
         run_script(
             "nft",
             ["-f", "-"],
@@ -162,22 +212,15 @@ impl DevelopmentNetwork {
                 r#"table inet {filter_table} {{
 	chain input {{
 		type filter hook input priority filter; policy accept;
-		iifname "{host}" ip saddr {CELL_IPV4_CIDR} tcp sport 5555 ct state established accept
-		iifname "{host}" drop
-	}}
+{input}	}}
 	chain forward {{
 		type filter hook forward priority filter; policy accept;
-		iifname "{host}" ip saddr != {CELL_IPV4_CIDR} drop
-		iifname "{host}" ip saddr {CELL_IPV4_CIDR} accept
-		oifname "{host}" ip daddr {CELL_IPV4_CIDR} ct state established,related accept
-		oifname "{host}" drop
-	}}
+{forward}	}}
 }}
 table ip {nat_table} {{
 	chain postrouting {{
 		type nat hook postrouting priority srcnat; policy accept;
-		ip saddr {CELL_IPV4_CIDR} masquerade
-	}}
+{nat}	}}
 }}
 "#
             ),
@@ -193,10 +236,10 @@ table ip {nat_table} {{
 
         while let Some(resource) = self.resources.pop() {
             let result = match resource {
-                NetworkResource::UfwForwardRule => remove_ufw_rule(&self.names),
+                NetworkResource::UfwForwardRule(index) => remove_ufw_rule(&self.names, index),
                 NetworkResource::Namespace => run("ip", ["netns", "delete", &self.names.namespace]),
-                NetworkResource::HostInterface => {
-                    run("ip", ["link", "delete", &self.names.host_interface])
+                NetworkResource::HostInterface(index) => {
+                    run("ip", ["link", "delete", &self.names.host_interfaces[index]])
                 }
                 NetworkResource::FilterTable => {
                     run("nft", ["delete", "table", "inet", &self.names.filter_table])
@@ -233,7 +276,9 @@ table ip {nat_table} {{
         let names = NetworkNames::for_spec(spec);
         let mut first_error = None;
 
-        record_error(&mut first_error, remove_ufw_rule(&names));
+        for index in 0..LINKS.len() {
+            record_error(&mut first_error, remove_ufw_rule(&names, index));
+        }
         record_error(
             &mut first_error,
             run_script(
@@ -245,11 +290,10 @@ table ip {nat_table} {{
                 ),
             ),
         );
-        if link_exists(&names.host_interface) {
-            record_error(
-                &mut first_error,
-                run("ip", ["link", "delete", &names.host_interface]),
-            );
+        for interface in &names.host_interfaces {
+            if link_exists(interface) {
+                record_error(&mut first_error, run("ip", ["link", "delete", interface]));
+            }
         }
         if namespace_exists(&names.namespace) {
             record_error(
@@ -294,15 +338,19 @@ table ip {nat_table} {{
     }
 }
 
-fn ufw_rule_arguments<'a>(operation: &'a str, names: &'a NetworkNames) -> [&'a str; 13] {
+fn ufw_rule_arguments<'a>(
+    operation: &'a str,
+    names: &'a NetworkNames,
+    index: usize,
+) -> [&'a str; 13] {
     [
         "-w",
         operation,
         "ufw-user-forward",
         "-i",
-        &names.host_interface,
+        &names.host_interfaces[index],
         "-s",
-        CELL_IPV4_CIDR,
+        LINKS[index].cell_cidr,
         "-m",
         "comment",
         "--comment",
@@ -325,9 +373,11 @@ fn ufw_chain_exists() -> Result<bool, DevelopmentError> {
     }
 }
 
-fn remove_ufw_rule(names: &NetworkNames) -> Result<(), DevelopmentError> {
-    if ufw_chain_exists()? && command_succeeds("iptables", ufw_rule_arguments("-C", names))? {
-        run("iptables", ufw_rule_arguments("-D", names))?;
+fn remove_ufw_rule(names: &NetworkNames, index: usize) -> Result<(), DevelopmentError> {
+    if ufw_chain_exists()?
+        && command_succeeds("iptables", ufw_rule_arguments("-C", names, index))?
+    {
+        run("iptables", ufw_rule_arguments("-D", names, index))?;
     }
     Ok(())
 }
@@ -455,13 +505,22 @@ mod tests {
     fn network_objects_are_stable_and_interface_names_fit_linux() {
         let names = NetworkNames::for_spec(&spec(1001));
         assert_eq!(names.namespace, "droidloom-u1001");
-        assert_eq!(names.host_interface, "dlh1001");
-        assert!(names.host_interface.len() < libc::IF_NAMESIZE);
+        assert_eq!(names.host_interfaces, ["dlh1001", "dlm1001"]);
+        assert!(names.host_interfaces.iter().all(|name| name.len() < libc::IF_NAMESIZE));
     }
 
     #[test]
-    fn cell_and_gateway_use_the_same_bounded_subnet() {
-        assert_eq!(HOST_IPV4_CIDR, "10.177.0.1/30");
-        assert_eq!(CELL_IPV4_CIDR, "10.177.0.2/32");
+    fn each_cell_address_and_gateway_share_a_bounded_subnet() {
+        let subnets: Vec<_> = LINKS
+            .iter()
+            .map(|link| (link.host_cidr, link.cell_cidr, link.peer))
+            .collect();
+        assert_eq!(
+            subnets,
+            [
+                ("10.177.0.1/30", "10.177.0.2/32", "eth0"),
+                ("10.177.0.5/30", "10.177.0.6/32", "eth1"),
+            ]
+        );
     }
 }

@@ -343,8 +343,12 @@ enters Android.
 
 ## Network
 
-Each cell owns a network namespace and one veth peer. Host policy assigns its
-address, forwarding, DNS broker, anti-spoofing, and NAT/firewall objects under
+Each cell owns a network namespace and two veth peers, one per kind of host
+uplink: `eth0` stands for Wi-Fi and `eth1` for metered mobile data, so Android
+has a network per radio as on a phone. A host that tells them apart steers each
+link's traffic to its uplink and sets a link down while its uplink is gone; on
+other hosts both links follow the host's default route. Host policy assigns
+their addresses, forwarding, DNS broker, anti-spoofing, and NAT/firewall objects under
 a stable cell tag. Android `netd` may operate only inside the cell namespace.
 Teardown removes every tagged host object even if Android is unresponsive.
 
